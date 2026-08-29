@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# WORK ITEM: repository scaffold (M0 step 1)
+# ---------------------------------------------------------------------------
+# Operator direction 2026-08-29: "I have created this folder
+# c:\repos\trading-ai-assistance — go ahead and create all the Claude and
+# Codex requirements there." Design ruling §2.1: the orchestrator lives in its
+# own repository as a human-assistance tool.
+
+name: repo_scaffold
+work_item: repo_scaffold
+owner: claude
+reviewer: operator + codex
+scope_base: ""            # root commit — no base
+status: >-
+  DELIVERED 2026-08-29 — awaiting operator + Codex review. Scaffold only: no
+  orchestrator behaviour exists; the two JSON schemas are DRAFT (unreviewed)
+  and the target config for trading-ai is PROPOSED. The design document moved
+  here from trading-ai (which keeps a pointer).
+
+objective: >-
+  Stand up trading-ai-assistance with its binding CLAUDE.md/AGENTS.md, the
+  design authority, the published review.json/fold.json schemas, the first
+  target config, package layout, and a test proving the schemas reject
+  malformed shapes — so M0's remaining prerequisites (CLI install, smoke
+  runs, trading-ai obligations slice) have a home.
+
+non_goals:
+  - Any orchestrator behaviour (state machine, drivers, gate runner, ledger,
+    briefs, landing) — M1+.
+  - Installing the Codex CLI or running any live claude/codex session.
+  - Any change to trading-ai beyond replacing the moved design doc with a pointer.
+  - Approving the schemas or the target config; both are review inputs.
+
+focused_tests:
+  - tests/test_schemas.py
+
+allowed_files:
+  - "*"                    # root commit: everything in the scaffold
+
+dependencies: []
+
+blocking_invariants:
+  - "No credential, connection string, or agent CLI config content anywhere in the repository."
+  - "No LLM call path exists; the package contains no behaviour yet."
+  - "Schemas are valid JSON Schema draft 2020-12 and additionalProperties:false at the top level."
+
+expected_predeploy: {}
+expected_postapply: {}
+
+operator_actions:
+  - Review with Codex; rule the design §10 open decisions when convenient.
+  - Install the Codex CLI (`npm i -g @openai/codex`) for M0's smoke runs.
+  - Push to origin (private) and enable GitHub security scanning (design §7.3).
+
+rollback:
+  strategy: >-
+    Delete the repository contents; nothing outside it is affected except the
+    trading-ai pointer file, which can be reverted to the full design text.

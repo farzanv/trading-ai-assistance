@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v1/review.schema.json",
+  "title": "review.json — structured reviewer output (design §5.1, §7.1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "reviewed_range", "tree_digest", "manifest", "verdict", "findings", "scope_observations", "reviewer"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "reviewed_range": { "type": "string", "pattern": "^[0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40}$" },
+    "tree_digest": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "git tree object id of the reviewed SHA; landing requires equality" },
+    "manifest": { "type": "string", "description": "target-repo-relative manifest path" },
+    "lens": { "type": "string", "enum": ["code", "design", "security"], "default": "code" },
+    "verdict": { "type": "string", "enum": ["CLEAN", "FINDINGS"], "description": "CLEAN = no P0/P1/P2 findings" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "title", "description", "required_change"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z0-9]+-R[0-9]+-[0-9]{2,}$", "description": "stable across rounds when reopened, e.g. P8-R4-01" },
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "section": { "type": "string" },
+          "file": { "type": "string" },
+          "title": { "type": "string", "maxLength": 200 },
+          "description": { "type": "string" },
+          "required_change": { "type": "string" },
+          "requires_ruling": { "type": "boolean", "default": false },
+          "earlier_phase_gap": { "type": ["string", "null"], "default": null, "description": "e.g. \"phase7:§3.3\" — STOP; earlier phase amended first" },
+          "blocks_downstream": { "type": "boolean", "default": false, "description": "Mode A tripwire: an open decision load-bearing for the next phase's seam" },
+          "unknown_contract": { "type": "boolean", "default": false, "description": "provider/API contract not established by pinned docs or captures — guessing prohibited; STOP" }
+        }
+      }
+    },
+    "scope_observations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "foreign files, undeclared changes, interleaved commits — any entry is a STOP"
+    },
+    "security": {
+      "type": "object",
+      "description": "required for lens=code; each item PASS | FAIL | N/A with a note on FAIL",
+      "additionalProperties": false,
+      "required": ["parameterised_sql", "no_credential_logging", "least_privilege_db_objects", "job_robustness_contract", "provider_calls_bounded_documented", "dependencies_pinned_named", "no_dynamic_code_execution"],
+      "properties": {
+        "parameterised_sql": { "$ref": "#/$defs/check" },
+        "no_credential_logging": { "$ref": "#/$defs/check" },
+        "least_privilege_db_objects": { "$ref": "#/$defs/check" },
+        "job_robustness_contract": { "$ref": "#/$defs/check" },
+        "provider_calls_bounded_documented": { "$ref": "#/$defs/check" },
+        "dependencies_pinned_named": { "$ref": "#/$defs/check" },
+        "no_dynamic_code_execution": { "$ref": "#/$defs/check" }
+      }
+    },
+    "dependencies_added": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "new/changed pinned requirements, e.g. \"httpx==0.27.2\" — informational, surfaced in the Human Gate Brief, never a gate"
+    },
+    "open_decisions": {
+      "type": "array",
+      "description": "design lens: the doc's open decisions, for the operator's decision inbox",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "summary"],
+        "properties": {
+          "ref": { "type": "string", "description": "e.g. \"§9.1\"" },
+          "summary": { "type": "string" },
+          "blocks_downstream": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "type": "string", "enum": ["codex", "claude"] },
+        "model": { "type": "string" },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 },
+            "cache_read": { "type": "integer", "minimum": 0 },
+            "cache_write": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["PASS", "FAIL", "N/A"] },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}
