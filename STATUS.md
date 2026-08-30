@@ -10,6 +10,14 @@
 | First target | `trading-ai` (`c:\Repos\trading-ai`, branch `development`); first live lane planned = CA design Phase 9 under Mode B while the operator watches (M1) |
 | Suite | 0 tests |
 
+## Review requests outstanding
+
+- **Codex:** review the scaffold (`manifests/repo_scaffold.yaml`), the DRAFT schemas, the
+  design rev 1, and answer the four questions in `docs/design/SECURITY_SCANNING_OPTIONS.md`
+  (security scanning = phase 2, approach undecided).
+- Also pending Codex review in `trading-ai`: branch `process/orchestrator-pointer-dev-ruling`
+  (CLAUDE.md Dev-RW amendment + design pointer; parked off `development`).
+
 ## Open decisions (design §10)
 
 `max_rounds` and budgets · P2-on-design-docs rule · landing policy · ownership of M0–M3 ·
