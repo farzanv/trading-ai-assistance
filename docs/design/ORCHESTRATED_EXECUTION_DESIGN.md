@@ -171,7 +171,9 @@ checkable from the manifest and the diff, none require interpretation:
    write, deployment) — these are executed only under the exact operator grant, never by
    the orchestrator.
 6. A reviewer finding carries `requires_ruling: true` or `earlier_phase_gap: true`.
-7. Any counter trips: `max_rounds`, token budget, wall-clock budget, unexpected base.
+7. Any counter trips: `max_rounds`, token budget, wall-clock budget, unexpected base, or
+   the pause budget of §5.6 (an agent usage/rate limit that does not clear in time — a
+   pause itself is *not* a gate, only its exhaustion is).
 8. **Unknown provider / API contract (operator addition 2026-08-29).** Either agent
    reports that a provider endpoint, parameter, limit, paging rule, payload shape,
    entitlement, or coverage behaviour is **not established** by the pinned public docs,
@@ -399,6 +401,94 @@ STATUS.md phase row are therefore **rendered from the ledger** by the orchestrat
 bookkeeping slice that Claude commits and Codex reviews as today — the prose stays
 agent-authored, the SHAs and ranges stop being retyped. Handoff documents remain
 Claude-authored; the orchestrator supplies their §2/§5 tables.
+
+### 5.5 Agent selection — model and effort per role, per lane (operator request 2026-08-29)
+
+Which model and how much reasoning effort each agent uses is **lane configuration**, not
+something baked into the orchestrator. The target config declares, per lane kind and per
+role, the agent, model, and effort; a lane's manifest may override for that lane only.
+Every invocation records the resolved (agent, model, effort) in the ledger, and the
+reviewer's `review.json` / author's `fold.json` echo the model that actually ran, so a
+review is always attributable to a specific model at a specific effort.
+
+```yaml
+lanes:
+  design:
+    author:   { agent: claude, model: claude-fable-5, effort: high }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
+  implementation:
+    author:   { agent: claude, model: claude-fable-5, effort: high }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
+  bookkeeping:
+    author:   { agent: claude, model: claude-sonnet-5, effort: medium }   # rendered tables + prose only
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: medium }
+```
+
+How it reaches each CLI (documented for Claude Code; Codex to be confirmed in the M0
+smoke run):
+
+| Agent | Model | Effort | Cost / turn caps |
+|---|---|---|---|
+| Claude Code `claude -p` | `--model <full model id>` | `--effort low\|medium\|high\|xhigh\|max` | `--max-budget-usd`, `--max-turns` — the lane's per-invocation budget is passed here so a runaway session ends with a non-zero exit the orchestrator treats as a counter trip |
+| Codex CLI `codex exec` | `-m/--model` | `-c model_reasoning_effort=<low\|medium\|high>` (config override; `~/.codex/config.toml` currently sets `high`) — **UNVERIFIED until M0** | none documented — **UNVERIFIED** |
+
+Rules: effort and model are never lowered *during* a round to make it converge — a change
+takes effect only at the next lane start and is recorded; the reviewer's model/effort is
+never lower than the author's for the same lane kind (a weaker reviewer is a weaker gate);
+bookkeeping lanes may use a cheaper model because their content is rendered from the ledger
+and the prose is short.
+
+### 5.6 Limits and outages — a PAUSE is not a STOP (operator request 2026-08-29)
+
+Agent CLIs hit hourly/weekly usage limits, per-minute rate limits (HTTP 429), and provider
+overloads. These are **not defects in the slice**, so they must not be reported as review
+failures or trip `max_rounds`; and they must not be silent. The state machine gets a
+distinct state:
+
+```
+… any agent invocation ──limit/outage detected──▶ PAUSED_LIMIT ──limit clears──▶ resume the SAME step
+                                                       │
+                                                       └── pause budget exhausted ──▶ STOP (Human Gate Brief)
+```
+
+**Detection (deterministic, from the CLI's own signals):**
+
+- Claude Code: in `--output-format stream-json`, `system/api_retry` events carry an
+  `error` category — `rate_limit`, `overloaded`, `billing_error`, `authentication_failed`,
+  `server_error`, … — plus `attempt`, `max_retries`, `retry_delay_ms`. The orchestrator
+  reads these live; a final non-zero exit whose last error category is `rate_limit` /
+  `overloaded` / `billing_error` is classified `LIMIT`, `OUTAGE`, or `ACCOUNT` respectively.
+  The subscription hourly/weekly usage-limit message ("limit reached … resets at …") is
+  matched on the result text and classified `LIMIT` with the reset time when present —
+  the exact surface is **confirmed in the M0 smoke run**, never assumed.
+- Codex: exit code + stderr/`--json` event text — patterns established in the M0 smoke run
+  and pinned in `targets/*.yaml` under `limit_signals`; an unrecognised failure is
+  `UNKNOWN_FAILURE` → STOP, never silently retried.
+- The classification, raw category, reset time (if any), attempt count, and the step being
+  retried are appended to the ledger.
+
+**Behaviour:**
+
+1. The in-flight step is discarded cleanly (worktree left as-is, nothing landed, no
+   round counted).
+2. **Notify immediately** — console line (always; the orchestrator is a foreground
+   process) *and* the alert channel: `PAUSED_LIMIT lane=<lane> step=<author rev 3 |
+   review round 3> agent=<claude|codex> class=<LIMIT|OUTAGE|ACCOUNT> resets_at=<time or
+   unknown> next_retry=<time>`.
+3. Wait: until `resets_at` if the CLI reported one; otherwise exponential backoff from
+   `retry_delay_ms` (cap: 30 min between attempts). Each retry is logged and printed.
+4. Resume **the same step** (same session id via `--resume` where the step was mid-session)
+   — the lane's round counter and budget are unchanged by a pause.
+5. A **pause budget** per lane (proposed: 12 hours total paused, or 3 consecutive
+   `ACCOUNT` classifications) turns the pause into a STOP with a Human Gate Brief that
+   says exactly which limit, which agent, and when it resets. `ACCOUNT` (billing/auth)
+   never auto-retries more than once — it is the operator's to fix.
+6. A `STOP` file or Ctrl-C during a pause ends the lane cleanly like any other halt;
+   resume later from the ledger line.
+
+Console output is the minimum: every state transition — including every pause, retry, and
+resume — prints one line with the lane, step, and reason, so an operator watching the
+terminal always knows whether the loop is working, waiting, or stopped.
 
 ## 6. Hard boundaries the orchestrator enforces by construction
 

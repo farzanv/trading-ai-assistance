@@ -26,8 +26,12 @@ template-database relocation (`trading-ai` side) · whether this repo gets push-
 
 ## Prerequisites outstanding (design §8)
 
-1. Codex CLI (`codex exec`) installed and smoke-tested in a read-only sandbox.
-2. `claude -p` headless smoke run with `--resume` and a restricted tool allowlist.
+1. Codex CLI (`codex exec`) installed and smoke-tested in a read-only sandbox; confirm
+   `-m` and the `model_reasoning_effort` override, exit codes, and the exact usage-limit
+   surface (design §5.5/§5.6 — pinned into `targets/trading-ai.yaml` `limit_signals`).
+2. `claude -p` headless smoke run with `--resume`, `--model`, `--effort`,
+   `--max-budget-usd`, a restricted tool allowlist, and capture of the `system/api_retry`
+   stream event + the hourly/weekly usage-limit message text.
 3. `review.json` / `fold.json` obligations added to `trading-ai`'s `AGENTS.md` + `CLAUDE.md`
    (a `trading-ai` process slice).
 4. `trading-ai` collaboration contract §1.2 amendment (operator).

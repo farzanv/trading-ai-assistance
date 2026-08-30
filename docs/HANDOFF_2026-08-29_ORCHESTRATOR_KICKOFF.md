@@ -179,6 +179,11 @@ the operator's §1.2 amendment to the collaboration contract; the `trading_ai_ag
 - **Convergence** — reviewer verdict CLEAN (no P0–P2) *and* gate PASS (or docs-only
   INCONCLUSIVE with scope PASS).
 - **STOP** — the loop halts and writes a Human Gate Brief; nothing lands.
+- **PAUSED_LIMIT** — an agent hit a usage/rate limit or the provider is down; the loop
+  prints and emails a notice, waits for the reset, and resumes the *same* step. Not a
+  round, not a failure; becomes a STOP only if the pause budget runs out (design §5.6).
+- **Model / effort per role** — which model and reasoning effort each agent uses is set
+  per lane kind in `targets/<repo>.yaml` (design §5.5), recorded in the ledger on every run.
 - **Human gate** — a point where only the operator can act (ruling, migration, deployment,
   Test validation, external authorization), detected from the manifest and diff.
 - **Mode A / Mode B** — unattended chaining of design phases with a decision inbox / a

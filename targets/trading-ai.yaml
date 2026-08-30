@@ -31,13 +31,51 @@ agent_rules:                       # files the agents are bound by inside this t
   - dil-engine/docs/process/COLLABORATION_CONTRACT.md
   - dil-engine/docs/process/DECISIONS.md
 
+# Model/effort per role per lane (design §5.5). Claude flags documented (--model, --effort);
+# Codex flags UNVERIFIED until the M0 smoke run. A lane manifest may override for that lane.
+agents:
+  claude:
+    cli: claude
+    model_flag: "--model"
+    effort_flag: "--effort"           # low | medium | high | xhigh | max
+    budget_flag: "--max-budget-usd"
+    turns_flag: "--max-turns"
+  codex:
+    cli: codex
+    model_flag: "-m"
+    effort_override: "-c model_reasoning_effort={effort}"   # UNVERIFIED (M0)
+
 lanes:
   design:
+    author:   { agent: claude, model: claude-fable-5, effort: high, max_budget_usd: 25, max_turns: 200 }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
     author_tools: [edit, git, pytest, pyflakes]      # no MCP DB, no provider MCP, no web
     reviewer_sandbox: read-only
     max_rounds: 5                                   # design §10 decision 2 — PROPOSED
   implementation:
+    author:   { agent: claude, model: claude-fable-5, effort: high, max_budget_usd: 40, max_turns: 400 }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
     author_tools: [edit, git, pytest, pyflakes, dev-db, provider-env]   # dev-db = trading_ai_v4 RW (ruling 2026-08-29)
     reviewer_sandbox: read-only
     reviewer_tools: [dev-db-readonly]
     max_rounds: 5
+  bookkeeping:
+    author:   { agent: claude, model: claude-sonnet-5, effort: medium, max_budget_usd: 5, max_turns: 40 }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: medium }
+    author_tools: [edit, git]
+    reviewer_sandbox: read-only
+    max_rounds: 2
+
+# Limit / outage handling (design §5.6): PAUSED_LIMIT, never a STOP until the pause budget trips.
+limits:
+  pause_budget_hours: 12            # PROPOSED
+  max_consecutive_account_failures: 3
+  retry_backoff_cap_minutes: 30
+  limit_signals:                    # pinned from the M0 smoke run; anything unrecognised = UNKNOWN_FAILURE -> STOP
+    claude:
+      stream_event: "system/api_retry"          # error ∈ rate_limit | overloaded | billing_error | authentication_failed | server_error
+      usage_limit_text: []                      # UNVERIFIED — fill with the exact "limit reached … resets at" surface at M0
+    codex:
+      exit_codes: []                            # UNVERIFIED (M0)
+      stderr_patterns: []                       # UNVERIFIED (M0)
+  notify: [console, email]          # console always; email via the existing alert channel
