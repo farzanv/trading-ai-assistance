@@ -443,13 +443,15 @@ problem library for a follow-up slice without ever having blocked the loop.
   deploys the tag, not a branch. The reviewed SHA, the landed SHA, the tagged SHA, and
   the deployed SHA are one value, and the ledger records each step's evidence.
 
-### 7.3 Out of scope (deferred, operator ruling 2026-08-29)
+### 7.3 Out of scope — PHASE 2 (operator ruling 2026-08-29; options in `SECURITY_SCANNING_OPTIONS.md`)
 
 Library vetting and vulnerability scanning of dependencies (GitHub Dependabot or a local
 open-source scanner such as `pip-audit`), static security lint (`bandit`), hashed
 requirements, egress blocking in test runs, and a dedicated second security-lens review.
 These run on push or on the operator's schedule by other tooling; a finding there opens a
 normal follow-up work item. They are not part of the orchestrator and never gate the loop.
+The choice between GitHub scanning, local scanners, or a hybrid is **open for phase 2** and
+analysed in `docs/design/SECURITY_SCANNING_OPTIONS.md` (Codex input requested).
 
 ## 8. Prerequisites (what is missing on this machine today)
 
