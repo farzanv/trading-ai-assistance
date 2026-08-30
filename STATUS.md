@@ -12,6 +12,7 @@
 
 ## Review requests outstanding
 
+- **Start with** `docs/HANDOFF_2026-08-29_ORCHESTRATOR_KICKOFF.md` (why, rulings, walkthrough, glossary).
 - **Codex:** review the scaffold (`manifests/repo_scaffold.yaml`), the DRAFT schemas, the
   design rev 1, and answer the four questions in `docs/design/SECURITY_SCANNING_OPTIONS.md`
   (security scanning = phase 2, approach undecided).

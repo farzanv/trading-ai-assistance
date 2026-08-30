@@ -10,6 +10,8 @@ in only at named human gates.
   a lane's grants into the agent sessions only.
 - **Fail closed.** Anything unexpected is a STOP with a plain-language Human Gate Brief.
 
+**New here? Read [`docs/HANDOFF_2026-08-29_ORCHESTRATOR_KICKOFF.md`](docs/HANDOFF_2026-08-29_ORCHESTRATOR_KICKOFF.md) first** — the problem, the rulings, a worked walkthrough of one lane, what changes for Codex, and a glossary.
+
 Design authority: [`docs/design/ORCHESTRATED_EXECUTION_DESIGN.md`](docs/design/ORCHESTRATED_EXECUTION_DESIGN.md).
 Binding invariants: [`CLAUDE.md`](CLAUDE.md) · Codex notes: [`AGENTS.md`](AGENTS.md).
 Current state: [`STATUS.md`](STATUS.md).

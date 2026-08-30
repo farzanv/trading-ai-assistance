@@ -1,7 +1,8 @@
 # Codex Working Notes — trading-ai-assistance
 
-Read with `CLAUDE.md` (binding invariants) and `docs/design/ORCHESTRATED_EXECUTION_DESIGN.md`
-(design authority, operator-ruled). This repository is a deterministic orchestrator — a
+Start with `docs/HANDOFF_2026-08-29_ORCHESTRATOR_KICKOFF.md` (the why, the rulings, a
+worked walkthrough, glossary), then `CLAUDE.md` (binding invariants) and
+`docs/design/ORCHESTRATED_EXECUTION_DESIGN.md` (design authority, operator-ruled). This repository is a deterministic orchestrator — a
 human-assistance tool — that drives the Claude ↔ Codex loop for target repositories.
 It is not an LLM agent and must never become one.
 
