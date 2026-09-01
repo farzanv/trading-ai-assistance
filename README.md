@@ -39,9 +39,10 @@ trading-ai-assistance/
 └── tests/                            # no live agents/network/target repos in fast suite
 ```
 
-The current scaffold still contains the proposed legacy `targets/trading-ai.yaml` and
-top-level `runs/.gitkeep`; V0-A migrates those settings into the reviewed Project Control
-Plane. No target-repository manifest is created by that migration.
+V0-A migrated the legacy `targets/trading-ai.yaml` proposal and the top-level `runs/`
+placeholder into this Project Control Plane layout
+(`projects/trading-ai-engine/project.yaml` plus policies). No target-repository manifest
+was created by that migration.
 
 V1 registers multiple projects but executes one lane globally. Normal control is therefore
 simple:

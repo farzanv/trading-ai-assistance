@@ -1,0 +1,128 @@
+# ---------------------------------------------------------------------------
+# WORK ITEM: V0-A walking skeleton (build plan step 2; design §9, architecture §14)
+# ---------------------------------------------------------------------------
+# Operator authorization 2026-09-01: "You are authorized to create the
+# implementation manifest for V0-A and implement that slice." Design revision 3
+# at commit 103020f is the approved architecture baseline.
+
+name: v0a_walking_skeleton
+work_item: v0a_walking_skeleton
+owner: claude
+reviewer: codex
+scope_base: "103020f640e6ccfab2347ccab7018fa0b43a6bc2"
+status: >-
+  DELIVERED 2026-09-01 — awaiting Codex review. Fake drivers only: no real
+  claude/codex invocation, no live target execution, no landing, no push, no
+  DB/provider access, no limit handling, no external notifications. T0 (the
+  target RVA JSON contract) remains a prerequisite for any live lane; nothing
+  here parses the current human RVA output.
+
+objective: >-
+  The smallest complete deterministic loop, replayable from its own ledger:
+  the Project Control Plane for trading-ai-engine (migrating the legacy
+  targets/trading-ai.yaml settings); the four version-2 external schemas
+  (author-result, fold, review, target-gate-result); the pure domain model and
+  state reducer with finding lifecycle and counters; the append-only
+  digest-chained JSONL ledger with replay; driver interfaces with fake
+  agent/gate implementations; and a simulated author -> review -> repair ->
+  no-code guidance -> final review -> convergence lane, with fail-closed and
+  replay tests.
+
+non_goals:
+  - Real Claude/Codex CLI drivers, exact-child auth checks, `assist` control
+    commands, verify/land process split, landing or push — V0-B.
+  - Live target-repository execution, database access, provider access.
+  - Limit/outage handling (PAUSED_LIMIT scheduling) and console monitoring — V0-B.
+  - External notification transports (none exist in V1 at all).
+  - Creating or modifying any target-repository manifest or file.
+  - Parsing the current human RVA output; the fake gate driver emits the v2
+    target-gate-result contract directly.
+
+focused_tests:
+  - tests/test_schemas.py            # v1 fixtures retained (path moved to schemas/v1/)
+  - tests/test_schemas_v2.py         # four v2 contracts, contradiction rules
+  - tests/test_state_machine.py      # reducer table; unspecified pairs fail closed
+  - tests/test_finding_lifecycle.py  # guidance, handoff, rejection, ping-pong
+  - tests/test_artifacts.py          # exact-set reconciliation, persistence safety
+  - tests/test_ledger.py             # append/replay; tamper detection
+  - tests/test_project.py            # control-plane loading, containment
+  - tests/test_simulated_lane.py     # full simulated convergence loop + replay
+
+acceptance:
+  - Every reducer transition is a pure function of (snapshot, event, policy);
+    unspecified (state, event) pairs produce a STOP, never a PASS.
+  - A simulated lane reaches author, review, repair, no-code guidance, final
+    review, and convergence without prose routing; the run ends at convergence
+    with no landing effect.
+  - Fold and re-review artifacts are accepted only under exact-set
+    reconciliation; malformed artifacts are retried once, then STOP.
+  - CLEAN is impossible from a non-gating lens, with any open P0-P2, or with a
+    prior blocking finding not VERIFIED_RESOLVED / CLOSED_NOT_A_DEFECT
+    (schema-enforced and reducer-enforced).
+  - max_rounds=10 and max_agent_invocations=40 trip to STOP; every issued
+    agent command increments the invocation counter exactly once.
+  - The ledger is append-only and digest-chained; deletion, reordering,
+    rewriting, duplicate sequence, and digest corruption are detected; replay
+    reproduces the recorded transitions exactly.
+  - Structured artifacts reject credential-named fields and connection-string
+    values; diagnostic text is bounded to 1 MiB.
+  - Project configuration resolves only inside its project root or shared/;
+    traversal escape is an error.
+  - No code path invokes a real CLI, network, database, or target repository.
+
+allowed_files:
+  - manifests/v0a_walking_skeleton.yaml
+  - projects/INDEX.md
+  - projects/registry.yaml
+  - projects/trading-ai-engine/INDEX.md
+  - projects/trading-ai-engine/project.yaml
+  - projects/trading-ai-engine/work-index.json
+  - projects/trading-ai-engine/agents/*
+  - projects/trading-ai-engine/skills/*
+  - projects/trading-ai-engine/policies/*
+  - projects/trading-ai-engine/plans/*
+  - projects/trading-ai-engine/state/.gitkeep
+  - shared/policies/safety-v1.md
+  - schemas/v1/*                     # moved unchanged from schemas/
+  - schemas/review.schema.json       # move source (delete)
+  - schemas/fold.schema.json         # move source (delete)
+  - schemas/v2/author-result.schema.json
+  - schemas/v2/fold.schema.json
+  - schemas/v2/review.schema.json
+  - schemas/v2/target-gate-result.schema.json
+  - src/orchestrator/__init__.py
+  - src/orchestrator/model.py
+  - src/orchestrator/reducer.py
+  - src/orchestrator/ledger.py
+  - src/orchestrator/artifacts.py
+  - src/orchestrator/project.py
+  - src/orchestrator/agents.py
+  - src/orchestrator/application.py
+  - tests/*
+  - targets/trading-ai.yaml          # migrated into projects/trading-ai-engine/ (delete)
+  - runs/.gitkeep                    # no shared top-level runtime store (delete)
+  - .gitignore                       # drop runs/ entries
+  - CLAUDE.md                        # Environment: legacy-scaffold sentence only
+  - README.md                        # migration paragraph only
+  - STATUS.md
+
+dependencies:
+  - repo_scaffold (root commit .. 103020f)
+
+blocking_invariants:
+  - "No LLM call decides a transition; the reducer consumes typed events only."
+  - "v1 schemas are retained byte-identical; v2 is published under a new /v2/ $id."
+  - "No credential, connection string, or agent CLI config content anywhere."
+  - "Tests are never skipped, weakened, or deleted to pass."
+  - "No project runtime file outside projects/<project>/state/."
+
+expected_predeploy: {}
+expected_postapply: {}
+
+operator_actions:
+  - Relay to Codex for review of the exact committed range.
+
+rollback:
+  strategy: >-
+    Revert the slice commits; the repository returns to 103020f. Nothing
+    outside this repository is touched.

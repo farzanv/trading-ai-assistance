@@ -6,8 +6,6 @@ __pycache__/
 .mcp.json
 .env
 *.env
-runs/*
-!runs/.gitkeep
 projects/*/state/*
 !projects/*/state/.gitkeep
 worktrees/

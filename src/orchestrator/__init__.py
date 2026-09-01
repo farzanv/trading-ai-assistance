@@ -1,21 +1,23 @@
 """trading-ai-assistance — deterministic orchestrator for the author/review loop.
 
-Package layout (design: docs/design/ORCHESTRATED_EXECUTION_DESIGN.md):
+Package layout (design: docs/design/DETERMINISTIC_PYTHON_APPLICATION_ARCHITECTURE.md §12):
 
-- ``state``    — lane states, transitions, and the convergence / stop predicates (§3).
-- ``gates``    — human-gate detection from a target manifest + diff (§3.3).
-- ``artifacts``— schema validation of review.json / fold.json against ``schemas/``.
-- ``drivers``  — thin subprocess wrappers for ``claude -p`` and ``codex exec`` behind an
-                 interface, so tests use fakes and never spawn a CLI.
-- ``verify``   — credential-free target RVA/test process adapter.
-- ``land``     — separate hooks-disabled fixed Git plumbing; V0 local fast-forward only.
-- ``ledger``   — append-only, digest-chained run ledger (§5.3).
-- ``brief``    — Human Gate Brief rendering (§3.4).
-- ``cli``      — ``orchestrate`` entry point.
+- ``model``       — frozen states, findings, events, commands, policy, decisions.
+- ``reducer``     — pure transitions, finding lifecycle, counters; unspecified
+                    (state, event) pairs fail closed to STOPPED.
+- ``artifacts``   — the four v2 external-schema validators, exact-set
+                    reconciliation, and persistence safety.
+- ``ledger``      — append-only, digest-chained JSONL ledger with replay.
+- ``project``     — Project Control Plane loading with containment and digests.
+- ``agents``      — driver interfaces (V0-A: interfaces only; fakes in tests).
+- ``application`` — the lane coordinator loop; no transition judgement.
+
+V0-B adds real CLI drivers, the verify/land process split, recovery, limits,
+console monitoring, and the ``assist`` control commands.
 
 Nothing here calls a model. Nothing here holds a credential.
 """
 
 from __future__ import annotations
 
-__version__ = "0.0.0"
+__version__ = "0.1.0"

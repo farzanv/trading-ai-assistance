@@ -1,0 +1,31 @@
+# Limit / outage handling (design §5.6): PAUSED_LIMIT preserves the same step,
+# never consumes a review round; every newly spawned agent process (including a
+# retry) counts against the lane's invocation ceiling. Migrated from
+# targets/trading-ai.yaml. Enforcement is V0-B scope; V0-A pins the policy only.
+
+schema_version: 1
+
+billing_mode: subscription_only
+paid_api_fallback: false
+
+hourly:
+  first_retry_from_agent_run_start_minutes: 330
+  repeated_retry_minutes: 30
+  reported_reset_grace_minutes: 1
+weekly:
+  retry_minutes: 480
+  reported_reset_grace_minutes: 1
+unknown_limit:
+  retry_minutes: 30
+outage:
+  retry_minutes: 60
+account:
+  confirmation_retries: 1
+
+limit_signals:                    # pinned from the V0-B smoke run; anything unrecognised = UNKNOWN_FAILURE -> STOP
+  claude:
+    stream_event: "system/api_retry"          # error in rate_limit | overloaded | billing_error | authentication_failed | server_error
+    usage_limit_text: []                      # UNVERIFIED — fill from the exact V0-B child surface
+  codex:
+    exit_codes: []                            # UNVERIFIED (V0-B exact-child smoke)
+    stderr_patterns: []                       # UNVERIFIED (V0-B exact-child smoke)

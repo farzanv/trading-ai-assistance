@@ -112,8 +112,9 @@ External CLIs the orchestrator drives (must be on PATH; never vendored):
 Target repositories are registered through `projects/registry.yaml` and configured in
 `projects/<project>/project.yaml` (path, integration branch, manifest root, gate command,
 agent/skill/policy references). Runtime state stays under that project. No target path is
-hard-coded in source. The present `targets/trading-ai.yaml` is a legacy proposed scaffold
-pending the V0-A Project Control Plane migration and must not become a second authority.
+hard-coded in source. The legacy `targets/trading-ai.yaml` scaffold was migrated into
+`projects/trading-ai-engine/` in V0-A; nothing outside `projects/` may become a second
+configuration authority.
 
 ## Tests
 

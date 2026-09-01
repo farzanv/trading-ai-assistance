@@ -1,0 +1,337 @@
+"""Validation of the four v2 external artifacts and persistence safety.
+
+Every model- or gate-produced artifact passes JSON Schema validation plus the
+semantic checks the schema cannot express — exact-set reconciliation, lifecycle
+legality, verdict consistency (architecture §7.3) — before it can become a
+typed event. A failure raises :class:`ArtifactError`; the coordinator turns
+that into one retry, then a STOP.
+
+Persistence safety (design §7.1, architecture §7.4): structured artifacts are
+rejected when they carry credential-named fields or credential-shaped values,
+and diagnostic text is bounded to 1 MiB per invocation.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from jsonschema import Draft202012Validator
+
+from orchestrator.model import (
+    BLOCKING_SEVERITIES,
+    Disposition,
+    FindingState,
+    GateCategory,
+    LEGAL_PRIOR_OUTCOMES,
+    Lens,
+    NewFinding,
+    PriorAssessment,
+    PriorOutcome,
+    Severity,
+)
+
+DIAGNOSTIC_MAX_BYTES = 1_048_576  # 1 MiB per invocation (operator ruling 2026-08-31)
+
+_SCHEMA_FILES = {
+    "author-result": "author-result.schema.json",
+    "fold": "fold.schema.json",
+    "review": "review.schema.json",
+    "target-gate-result": "target-gate-result.schema.json",
+}
+
+#: Key segments that make a structured artifact forbidden (obvious credential
+#: fields). Matched on whole underscore-separated segments and whole keys, so
+#: ``tokens`` (usage counts) and ``author`` are not false positives.
+_FORBIDDEN_KEY_SEGMENTS = frozenset(
+    {"password", "passwd", "secret", "secrets", "apikey", "token", "credential", "credentials", "dsn"}
+)
+_FORBIDDEN_WHOLE_KEYS = frozenset(
+    {"api_key", "auth_file", "authorization", "connection_string", "access_key", "private_key", "env"}
+)
+#: Values that look like a URL with embedded password or key material.
+_FORBIDDEN_VALUE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^@\s]+@")
+_PRIVATE_KEY_MARKER = "-----BEGIN "
+
+
+class ArtifactError(Exception):
+    """The artifact is malformed, contradictory, or unsafe to persist."""
+
+    def __init__(self, artifact: str, errors: list[str]) -> None:
+        self.artifact = artifact
+        self.errors = errors
+        super().__init__(f"{artifact}: " + "; ".join(errors))
+
+
+@dataclass(frozen=True)
+class SchemaSet:
+    validators: Mapping[str, Draft202012Validator]
+
+
+def load_schema_set(schemas_dir: Path) -> SchemaSet:
+    validators: dict[str, Draft202012Validator] = {}
+    for name, filename in _SCHEMA_FILES.items():
+        with (schemas_dir / filename).open(encoding="utf-8") as fh:
+            schema = json.load(fh)
+        Draft202012Validator.check_schema(schema)
+        validators[name] = Draft202012Validator(schema)
+    return SchemaSet(validators=validators)
+
+
+def _schema_validate(schemas: SchemaSet, artifact: str, raw: Mapping[str, Any]) -> None:
+    errors = [
+        f"{'/'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
+        for e in schemas.validators[artifact].iter_errors(raw)
+    ]
+    if errors:
+        raise ArtifactError(artifact, errors)
+
+
+def artifact_digest(raw: Mapping[str, Any]) -> str:
+    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Persistence safety
+# ---------------------------------------------------------------------------
+
+
+def check_persistence_safety(artifact: str, raw: Any, _path: str = "") -> None:
+    """Reject credential-named fields and credential-shaped values (fail closed)."""
+    if isinstance(raw, Mapping):
+        for key, value in raw.items():
+            key_path = f"{_path}/{key}"
+            lowered = str(key).lower()
+            if lowered in _FORBIDDEN_WHOLE_KEYS or (
+                set(lowered.split("_")) & _FORBIDDEN_KEY_SEGMENTS
+            ):
+                raise ArtifactError(artifact, [f"forbidden credential-named field: {key_path}"])
+            check_persistence_safety(artifact, value, key_path)
+    elif isinstance(raw, (list, tuple)):
+        for index, item in enumerate(raw):
+            check_persistence_safety(artifact, item, f"{_path}[{index}]")
+    elif isinstance(raw, str):
+        if _FORBIDDEN_VALUE_RE.search(raw):
+            raise ArtifactError(
+                artifact, [f"credential-shaped value (URL with embedded secret) at {_path}"]
+            )
+        if _PRIVATE_KEY_MARKER in raw:
+            raise ArtifactError(artifact, [f"key material marker at {_path}"])
+
+
+def bounded_diagnostic(text: str) -> str:
+    """Cap diagnostic text at 1 MiB; a truncation names the digest and reason."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= DIAGNOSTIC_MAX_BYTES:
+        return text
+    digest = hashlib.sha256(encoded).hexdigest()
+    marker = f"\n[TRUNCATED reason=diagnostic-bound original_bytes={len(encoded)} sha256={digest}]"
+    keep = DIAGNOSTIC_MAX_BYTES - len(marker.encode("utf-8"))
+    truncated = encoded[:keep].decode("utf-8", errors="ignore")
+    return truncated + marker
+
+
+# ---------------------------------------------------------------------------
+# Typed validation results
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuthorResultSummary:
+    commit: str
+    revision: int
+    tree_digest: str
+
+
+@dataclass(frozen=True)
+class FoldSummary:
+    commit: str
+    revision: int
+    dispositions: tuple[tuple[str, Disposition], ...]
+
+
+@dataclass(frozen=True)
+class ReviewSummary:
+    lens: Lens
+    verdict: str
+    tree_digest: str
+    has_scope_observations: bool
+    new_findings: tuple[NewFinding, ...]
+    prior_findings: tuple[PriorAssessment, ...]
+    p3_findings: tuple[tuple[str, str], ...]  # (id, title) for the backlog artifact
+
+
+@dataclass(frozen=True)
+class GuidanceSummary:
+    finding_ids: tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
+# Validators (schema + semantics)
+# ---------------------------------------------------------------------------
+
+
+def validate_author_result(
+    schemas: SchemaSet, raw: Mapping[str, Any], expected_revision: int
+) -> AuthorResultSummary:
+    check_persistence_safety("author-result", raw)
+    _schema_validate(schemas, "author-result", raw)
+    if raw["revision"] != expected_revision:
+        raise ArtifactError(
+            "author-result",
+            [f"revision {raw['revision']} != expected {expected_revision}"],
+        )
+    return AuthorResultSummary(
+        commit=raw["commit"], revision=raw["revision"], tree_digest=raw["tree_digest"]
+    )
+
+
+def validate_fold(
+    schemas: SchemaSet,
+    raw: Mapping[str, Any],
+    outstanding_ids: frozenset[str],
+    expected_revision: int,
+) -> FoldSummary:
+    check_persistence_safety("fold", raw)
+    _schema_validate(schemas, "fold", raw)
+    errors: list[str] = []
+    if raw["revision"] != expected_revision:
+        errors.append(f"revision {raw['revision']} != expected {expected_revision}")
+    seen: list[str] = [d["finding_id"] for d in raw["dispositions"]]
+    duplicates = sorted({fid for fid in seen if seen.count(fid) > 1})
+    if duplicates:
+        errors.append(f"duplicate dispositions: {duplicates}")
+    missing = sorted(outstanding_ids - set(seen))
+    if missing:
+        errors.append(f"missing dispositions for outstanding findings: {missing}")
+    unknown = sorted(set(seen) - outstanding_ids)
+    if unknown:
+        errors.append(f"dispositions for unknown/non-outstanding findings: {unknown}")
+    if errors:
+        raise ArtifactError("fold", errors)
+    dispositions = tuple(
+        (d["finding_id"], Disposition(d["disposition"])) for d in raw["dispositions"]
+    )
+    return FoldSummary(commit=raw["commit"], revision=raw["revision"], dispositions=dispositions)
+
+
+def validate_review(
+    schemas: SchemaSet,
+    raw: Mapping[str, Any],
+    expected_lens: Lens,
+    historical: Mapping[str, FindingState],
+) -> ReviewSummary:
+    check_persistence_safety("review", raw)
+    _schema_validate(schemas, "review", raw)
+    errors: list[str] = []
+    if raw["lens"] != expected_lens.value:
+        errors.append(f"lens {raw['lens']!r} != expected {expected_lens.value!r}")
+
+    finding_ids = [f["id"] for f in raw["findings"]]
+    duplicate_new = sorted({fid for fid in finding_ids if finding_ids.count(fid) > 1})
+    if duplicate_new:
+        errors.append(f"duplicate finding ids: {duplicate_new}")
+    collisions = sorted(set(finding_ids) & set(historical))
+    if collisions:
+        errors.append(
+            f"new findings reuse historical ids (reopen via prior_findings instead): {collisions}"
+        )
+
+    prior_ids = [p["id"] for p in raw["prior_findings"]]
+    duplicate_prior = sorted({fid for fid in prior_ids if prior_ids.count(fid) > 1})
+    if duplicate_prior:
+        errors.append(f"duplicate prior-finding assessments: {duplicate_prior}")
+    missing = sorted(set(historical) - set(prior_ids))
+    if missing:
+        errors.append(f"historical blocking findings not reconciled: {missing}")
+    unknown = sorted(set(prior_ids) - set(historical))
+    if unknown:
+        errors.append(f"prior-finding assessments for unknown ids: {unknown}")
+    for assessment in raw["prior_findings"]:
+        fid = assessment["id"]
+        if fid not in historical:
+            continue
+        state = historical[fid]
+        outcome = PriorOutcome(assessment["outcome"])
+        legal = LEGAL_PRIOR_OUTCOMES.get(state, frozenset())
+        if outcome not in legal:
+            errors.append(
+                f"illegal lifecycle transition for {fid}: {state.value} -> {outcome.value}"
+            )
+
+    blocking_new = [f for f in raw["findings"] if f["severity"] in {s.value for s in BLOCKING_SEVERITIES}]
+    unresolved_prior = [
+        p
+        for p in raw["prior_findings"]
+        if p["outcome"]
+        not in {PriorOutcome.VERIFIED_RESOLVED.value, PriorOutcome.REVIEWER_ACCEPTS_REJECTION.value}
+    ]
+    clean_expected = not blocking_new and not unresolved_prior
+    if raw["verdict"] == "CLEAN" and not clean_expected:
+        errors.append("verdict CLEAN with open blocking evidence")
+    if raw["verdict"] == "FINDINGS" and clean_expected and raw["lens"] == Lens.GATING.value:
+        errors.append("verdict FINDINGS without any blocking finding or unresolved prior")
+    if errors:
+        raise ArtifactError("review", errors)
+
+    new_findings = tuple(
+        NewFinding(
+            finding_id=f["id"],
+            severity=Severity(f["severity"]),
+            title=f["title"],
+            requires_ruling=bool(f.get("requires_ruling", False)),
+            earlier_phase_gap=f.get("earlier_phase_gap") is not None,
+            unknown_contract=bool(f.get("unknown_contract", False)),
+        )
+        for f in raw["findings"]
+    )
+    prior = tuple(
+        PriorAssessment(finding_id=p["id"], outcome=PriorOutcome(p["outcome"]))
+        for p in raw["prior_findings"]
+    )
+    p3 = tuple(
+        (f["id"], f["title"]) for f in raw["findings"] if f["severity"] == Severity.P3.value
+    )
+    return ReviewSummary(
+        lens=Lens(raw["lens"]),
+        verdict=raw["verdict"],
+        tree_digest=raw["tree_digest"],
+        has_scope_observations=bool(raw["scope_observations"]),
+        new_findings=new_findings,
+        prior_findings=prior,
+        p3_findings=p3,
+    )
+
+
+def validate_guidance(
+    schemas: SchemaSet, raw: Mapping[str, Any], expected_finding_ids: frozenset[str]
+) -> GuidanceSummary:
+    """Guidance is a review/v2 artifact with ``lens: guidance`` and no code."""
+    check_persistence_safety("guidance", raw)
+    _schema_validate(schemas, "review", raw)
+    errors: list[str] = []
+    if raw["lens"] != Lens.GUIDANCE.value:
+        errors.append(f"lens {raw['lens']!r} != expected 'guidance'")
+    guidance = raw.get("guidance")
+    if guidance is None:
+        errors.append("guidance block missing")
+    else:
+        provided = set(guidance["finding_ids"])
+        if provided != expected_finding_ids:
+            errors.append(
+                f"guidance finding ids {sorted(provided)} != expected {sorted(expected_finding_ids)}"
+            )
+    if errors:
+        raise ArtifactError("guidance", errors)
+    return GuidanceSummary(finding_ids=tuple(sorted(guidance["finding_ids"])))
+
+
+def validate_gate_result(schemas: SchemaSet, raw: Mapping[str, Any]) -> GateCategory:
+    check_persistence_safety("target-gate-result", raw)
+    _schema_validate(schemas, "target-gate-result", raw)
+    return GateCategory(raw["category"])
