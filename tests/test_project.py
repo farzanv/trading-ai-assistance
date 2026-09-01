@@ -134,3 +134,28 @@ def test_registry_config_escape_fails_closed(tmp_path: Path) -> None:
     )
     with pytest.raises(ProjectError, match="escapes"):
         load_registry(projects)
+
+
+def test_run_dir_is_containment_checked_and_project_local(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    config = load_project(projects, "p1")
+    run_dir = config.run_dir("RUN-001")
+    assert run_dir.is_relative_to((projects / "p1" / "state" / "runs").resolve())
+
+
+@pytest.mark.parametrize(
+    "bad_run_id",
+    ["../other", "..", "a/b", "a\\b", ".hidden", "", "x" * 65, "run id"],
+)
+def test_unsafe_run_identifiers_fail_closed(tmp_path: Path, bad_run_id: str) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    config = load_project(projects, "p1")
+    with pytest.raises(ProjectError, match="unsafe run identifier"):
+        config.run_dir(bad_run_id)
+
+
+def test_undeclared_work_item_fails_closed(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    config = load_project(projects, "p1")
+    with pytest.raises(ProjectError, match="not declared"):
+        config.work_item("ghost_item")

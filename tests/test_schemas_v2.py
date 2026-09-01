@@ -119,6 +119,32 @@ def test_gate_result_category_enum_is_closed() -> None:
         _validator("target-gate-result.schema.json").validate(make_gate_result("LOOKS_FINE"))
 
 
+def test_gate_result_requires_verdict_and_tree_digest() -> None:
+    for field in ("verdict", "tree_digest"):
+        raw = make_gate_result("PASS")
+        del raw[field]
+        with pytest.raises(ValidationError):
+            _validator("target-gate-result.schema.json").validate(raw)
+
+
+def test_gate_verdict_must_be_consistent_with_the_category() -> None:
+    contradiction = make_gate_result("PASS", verdict="FAIL")
+    with pytest.raises(ValidationError):
+        _validator("target-gate-result.schema.json").validate(contradiction)
+    contradiction = make_gate_result("SCOPE", verdict="PASS")
+    with pytest.raises(ValidationError):
+        _validator("target-gate-result.schema.json").validate(contradiction)
+
+
+def test_finding_routing_flags_are_required_not_defaulted() -> None:
+    for field in ("requires_ruling", "earlier_phase_gap", "blocks_downstream", "unknown_contract", "section"):
+        finding = make_finding("F1")
+        del finding[field]
+        review = make_review(verdict="FINDINGS", findings=[finding])
+        with pytest.raises(ValidationError):
+            _validator("review.schema.json").validate(review)
+
+
 def test_gate_result_requires_at_least_one_check() -> None:
     with pytest.raises(ValidationError):
         _validator("target-gate-result.schema.json").validate(make_gate_result(checks=[]))

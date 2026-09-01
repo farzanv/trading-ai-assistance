@@ -4,9 +4,10 @@
   "title": "target-gate-result/v2 — the target RVA's machine-readable gate result (architecture §5.4, §7.1; design §8.1 / T0)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "category", "resolved_range", "manifest", "checks"],
+  "required": ["schema_version", "verdict", "category", "resolved_range", "manifest", "tree_digest", "checks"],
   "properties": {
     "schema_version": { "const": 2 },
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL"], "description": "the governing verdict; must be consistent with the category" },
     "category": {
       "type": "string",
       "enum": ["PASS", "DOCS_INCONCLUSIVE_SCOPE_PASS", "FIXABLE_TEST", "FIXABLE_LINT", "FIXABLE_STATIC_CHECK", "SCOPE", "BASE", "DEPENDENCY", "FOREIGN_COMMIT", "UNKNOWN"],
@@ -35,5 +36,13 @@
       "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
     },
     "gate_version": { "type": "string", "description": "version of the target gate implementation that produced this result" }
-  }
+  },
+  "allOf": [
+    {
+      "$comment": "verdict PASS if and only if the category is an accepting one",
+      "if": { "properties": { "category": { "enum": ["PASS", "DOCS_INCONCLUSIVE_SCOPE_PASS"] } } },
+      "then": { "properties": { "verdict": { "const": "PASS" } } },
+      "else": { "properties": { "verdict": { "const": "FAIL" } } }
+    }
+  ]
 }

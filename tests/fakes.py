@@ -8,11 +8,17 @@ and raises IndexError.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from orchestrator.agents import GitFacts, InvocationSpec
+from orchestrator.model import LaneIdentity
+from orchestrator.project import ProjectConfig, load_project
 
 BASE_SHA = "b" * 40
+WORK_ITEM = "sim_phase"
+MANIFEST = "dil-engine/manifests/sim_phase.yaml"
 
 
 def sha(n: int) -> str:
@@ -32,10 +38,66 @@ GOOD_FACTS = GitFacts(
 )
 
 
+def make_identity(lane_id: str = "LANE-SIM") -> LaneIdentity:
+    return LaneIdentity(
+        lane_id=lane_id, work_item=WORK_ITEM, scope_base=BASE_SHA, manifest=MANIFEST
+    )
+
+
+def make_test_project(root: Path, project_id: str = "sim-project") -> ProjectConfig:
+    """Write a minimal, containment-valid project tree and load it."""
+    projects = root / "projects"
+    project = projects / project_id
+    (project / "agents").mkdir(parents=True)
+    (project / "skills").mkdir()
+    (project / "policies").mkdir()
+    (projects / "registry.yaml").write_text(
+        f"schema_version: 1\nprojects:\n  {project_id}:\n    config: {project_id}/project.yaml\n",
+        encoding="utf-8",
+    )
+    (project / "project.yaml").write_text(
+        "\n".join(
+            [
+                "schema_version: 1",
+                f"project_id: {project_id}",
+                "repository:",
+                "  path: c:/tmp/target-repo",
+                "  integration_branch: development",
+                "  manifest_root: dil-engine/manifests",
+                "gate:",
+                "  command: [python, gate.py, --json]",
+                "agents:",
+                "  author: agents/author.md",
+                "skills:",
+                "  design: skills/design.md",
+                "policies:",
+                "  lanes: policies/lanes.yaml",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for rel in ("agents/author.md", "skills/design.md", "policies/lanes.yaml"):
+        (project / rel).write_text("package\n", encoding="utf-8")
+    (project / "work-index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "work_items": [
+                    {"id": WORK_ITEM, "kind": "design", "manifest": "sim_phase.yaml"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return load_project(projects, project_id)
+
+
 def make_author_result(revision: int = 1, **overrides: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "schema_version": 2,
-        "work_item": "sim_phase",
+        "work_item": WORK_ITEM,
         "commit": sha(revision),
         "scope_base": BASE_SHA,
         "revision": revision,
@@ -55,15 +117,18 @@ def make_finding(
     requires_ruling: bool = False,
     earlier_phase_gap: str | None = None,
     unknown_contract: bool = False,
+    blocks_downstream: bool = False,
 ) -> dict[str, Any]:
     finding: dict[str, Any] = {
         "id": finding_id,
         "severity": severity,
+        "section": "§1",
         "title": f"finding {finding_id}",
         "description": "a concrete defect",
         "required_change": "the required outcome",
         "requires_ruling": requires_ruling,
         "earlier_phase_gap": earlier_phase_gap,
+        "blocks_downstream": blocks_downstream,
         "unknown_contract": unknown_contract,
     }
     if severity in {"P0", "P1", "P2"}:
@@ -91,7 +156,7 @@ def make_review(
         "schema_version": 2,
         "reviewed_range": f"{BASE_SHA}..{sha(revision)}",
         "tree_digest": tree(revision),
-        "manifest": "dil-engine/manifests/sim_phase.yaml",
+        "manifest": MANIFEST,
         "review_kind": review_kind,
         "lens": lens,
         "verdict": verdict,
@@ -163,15 +228,52 @@ def make_fold(
 def make_gate_result(
     category: str = "DOCS_INCONCLUSIVE_SCOPE_PASS", *, revision: int = 1, **overrides: Any
 ) -> dict[str, Any]:
+    passing = category in {"PASS", "DOCS_INCONCLUSIVE_SCOPE_PASS"}
+    checks = (
+        [{"name": "scope", "result": "PASS"}]
+        if passing or category == "UNKNOWN"
+        else [{"name": "scope", "result": "PASS"}, {"name": category.lower(), "result": "FAIL"}]
+    )
     result: dict[str, Any] = {
         "schema_version": 2,
+        "verdict": "PASS" if passing else "FAIL",
         "category": category,
         "resolved_range": f"{BASE_SHA}..{sha(revision)}",
-        "manifest": "dil-engine/manifests/sim_phase.yaml",
-        "checks": [{"name": "scope", "result": "PASS"}],
+        "manifest": MANIFEST,
+        "tree_digest": tree(revision),
+        "checks": checks,
     }
     result.update(overrides)
     return result
+
+
+def build_coordinator(
+    tmp_path: Path,
+    *,
+    lane_id: str,
+    policy: Any,
+    schemas: Any,
+    author: Any,
+    reviewer: Any,
+    gate: Any,
+    clock: Any,
+    run_id: str = "RUN-001",
+) -> Any:
+    """A coordinator wired to a minimal Control Plane project under tmp_path."""
+    from orchestrator.application import LaneCoordinator
+
+    project = make_test_project(tmp_path / "control-plane")
+    return LaneCoordinator(
+        project=project,
+        identity=make_identity(lane_id),
+        run_id=run_id,
+        policy=policy,
+        schemas=schemas,
+        author=author,
+        reviewer=reviewer,
+        gate=gate,
+        clock=clock,
+    )
 
 
 class ScriptedAuthor:

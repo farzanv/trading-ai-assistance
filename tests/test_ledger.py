@@ -1,4 +1,4 @@
-"""Ledger integrity: append-only digest chain, tamper detection, replay."""
+"""Ledger integrity: append-only digest chain, tamper detection, full replay."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.application import LaneCoordinator
 from orchestrator.artifacts import load_schema_set
 from orchestrator.ledger import (
     Ledger,
@@ -19,7 +18,14 @@ from orchestrator.ledger import (
 )
 from orchestrator.model import GateCategory, LanePolicy, LaneState
 
-from tests.fakes import ScriptedAuthor, ScriptedGate, ScriptedReviewer, make_author_result, make_review
+from tests.fakes import (
+    ScriptedAuthor,
+    ScriptedGate,
+    ScriptedReviewer,
+    build_coordinator,
+    make_author_result,
+    make_review,
+)
 
 SCHEMAS = load_schema_set(Path(__file__).resolve().parents[1] / "schemas" / "v2")
 POLICY = LanePolicy(
@@ -32,14 +38,14 @@ POLICY = LanePolicy(
 
 def run_minimal_lane(tmp_path: Path) -> Path:
     """author rev 1 -> gate accepted -> review CLEAN -> converged."""
-    coordinator = LaneCoordinator(
+    coordinator = build_coordinator(
+        tmp_path,
         lane_id="LANE-T",
         policy=POLICY,
         schemas=SCHEMAS,
         author=ScriptedAuthor(author_results=[make_author_result()]),
         reviewer=ScriptedReviewer(reviews=[make_review(verdict="CLEAN", revision=1)]),
         gate=ScriptedGate(),
-        run_dir=tmp_path / "run",
         clock=lambda: "2026-09-01T00:00:00+00:00",
     )
     result = coordinator.run()
@@ -70,6 +76,7 @@ def test_valid_ledger_reads_and_replays(tmp_path: Path) -> None:
     path = run_minimal_lane(tmp_path)
     entries = read_entries(path)
     assert entries[0].prev_digest == "0" * 64
+    assert entries[0].payload["effect"] == "LANE_OPENED"
     assert [e.seq for e in entries] == list(range(1, len(entries) + 1))
     snapshot = replay(path, POLICY)
     assert snapshot.state is LaneState.LANDING
@@ -137,19 +144,105 @@ def test_unexpected_fields_are_rejected(tmp_path: Path) -> None:
         read_entries(path)
 
 
-def test_chain_aware_transition_forgery_fails_replay(tmp_path: Path) -> None:
-    """Even a tamperer who recomputes every digest cannot forge a transition:
-    replay re-runs the pure reducer and the recorded decision must match."""
-    path = run_minimal_lane(tmp_path)
+def _forge(path: Path, mutate) -> None:
+    """Apply ``mutate`` to each parsed line, then recompute the whole chain."""
     lines = path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
         raw = json.loads(line)
-        if raw["kind"] == "DECISION" and raw["payload"]["state_after"] == "LANDING":
-            raw["payload"]["state_after"] = "COMPLETED"
-            lines[index] = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        mutate(raw)
+        lines[index] = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     _rewrite(path, _rechain(lines))
     read_entries(path)  # the recomputed chain itself is internally consistent
+
+
+def test_chain_aware_transition_forgery_fails_replay(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "DECISION" and raw["payload"]["state_after"] == "LANDING":
+            raw["payload"]["state_after"] = "COMPLETED"
+            raw["payload"]["snapshot_after"]["state"] = "COMPLETED"
+
+    _forge(path, mutate)
     with pytest.raises(LedgerReplayError):
+        replay(path, POLICY)
+
+
+def test_chain_aware_predicate_input_forgery_fails_replay(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "DECISION" and "gate_category" in raw["payload"].get("inputs", {}):
+            raw["payload"]["inputs"]["worktree_clean"] = False
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="predicate inputs"):
+        replay(path, POLICY)
+
+
+def test_chain_aware_snapshot_forgery_fails_replay(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "DECISION":
+            raw["payload"]["snapshot_after"]["agent_invocations"] = 0
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="snapshot"):
+        replay(path, POLICY)
+
+
+def test_chain_aware_artifact_digest_forgery_fails_replay(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "ARTIFACT_ACCEPTED":
+            raw["payload"]["digest"] = "f" * 64
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="digest does not match"):
+        replay(path, POLICY)
+
+
+def test_mutated_artifact_file_fails_replay(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+    artifacts_dir = path.parent / "lanes" / "LANE-T" / "artifacts"
+    target = next(p for p in artifacts_dir.iterdir() if "review" in p.name)
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    raw["verdict"] = "FINDINGS"
+    target.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+    with pytest.raises(LedgerReplayError, match="digest does not match"):
+        replay(path, POLICY)
+
+
+def test_deleted_effect_evidence_fails_replay(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    planned = next(
+        i for i, line in enumerate(lines)
+        if json.loads(line)["payload"].get("effect") == "INVOCATION_PLANNED"
+    )
+    del lines[planned]
+    _rewrite(path, _rechain(lines))
+    with pytest.raises(LedgerReplayError):
+        replay(path, POLICY)
+
+
+def test_replay_refuses_a_different_lane_policy(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+    other = LanePolicy(
+        lane_kind="design",
+        accepted_gate_categories=frozenset({GateCategory.PASS}),
+    )
+    with pytest.raises(LedgerReplayError, match="different lane policy"):
+        replay(path, other)
+
+
+def test_replay_refuses_an_incomplete_run(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    _rewrite(path, _rechain(lines[:-1]))  # drop RUN_END
+    with pytest.raises(LedgerReplayError, match="RUN_END"):
         replay(path, POLICY)
 
 

@@ -10,6 +10,8 @@ Events carry only validated, typed facts; the reducer consumes nothing else.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
@@ -139,6 +141,11 @@ LEGAL_PRIOR_OUTCOMES: Mapping[FindingState, frozenset[PriorOutcome]] = {
 }
 
 
+class FindingOrigin(str, Enum):
+    REVIEWER = "REVIEWER"
+    GATE = "GATE"  # deterministic system finding from a fixable target-gate failure
+
+
 class ReasonCode(str, Enum):
     LANE_AUTHORIZED = "LANE_AUTHORIZED"
     AUTHOR_RESULT_ACCEPTED = "AUTHOR_RESULT_ACCEPTED"
@@ -182,8 +189,22 @@ class Awaiting(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Lane policy and snapshot
+# Lane identity, policy, and snapshot
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LaneIdentity:
+    """Immutable lane binding fixed at authorization (architecture §4.1).
+
+    Every artifact is validated against these values; a mismatch is a
+    malformed artifact, never a silently adopted new identity.
+    """
+
+    lane_id: str
+    work_item: str
+    scope_base: str  # full 40-hex SHA
+    manifest: str  # target-repo-relative manifest path
 
 
 @dataclass(frozen=True)
@@ -196,12 +217,28 @@ class LanePolicy:
     max_agent_invocations: int = 40
 
 
+def policy_digest(policy: LanePolicy) -> str:
+    """Stable digest binding a ledger to the exact policy it ran under."""
+    canonical = json.dumps(
+        {
+            "lane_kind": policy.lane_kind,
+            "accepted_gate_categories": sorted(c.value for c in policy.accepted_gate_categories),
+            "max_rounds": policy.max_rounds,
+            "max_agent_invocations": policy.max_agent_invocations,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class FindingRecord:
     finding_id: str
     severity: Severity
     title: str
     state: FindingState
+    origin: FindingOrigin = FindingOrigin.REVIEWER
     repair_attempts: int = 0
     guidance_given: bool = False
     consecutive_rejections: int = 0
@@ -214,7 +251,11 @@ class FindingRecord:
 
 @dataclass(frozen=True)
 class LaneSnapshot:
-    """The reducer's complete typed state. Findings are ordered by id."""
+    """The reducer's complete typed state. Findings are ordered by id.
+
+    ``current_sha``/``current_tree`` retain the validated candidate revision so
+    every later artifact is bound to it (never to whatever an artifact claims).
+    """
 
     state: LaneState = LaneState.AUTHORIZED
     awaiting: Awaiting | None = None
@@ -222,6 +263,8 @@ class LaneSnapshot:
     review_round: int = 0
     agent_invocations: int = 0
     artifact_retries: int = 0
+    current_sha: str = ""
+    current_tree: str = ""
     findings: tuple[FindingRecord, ...] = ()
 
     def finding(self, finding_id: str) -> FindingRecord | None:
@@ -242,7 +285,16 @@ class LaneSnapshot:
         )
 
     def historical_blocking_states(self) -> Mapping[str, FindingState]:
-        return {f.finding_id: f.state for f in self.findings if f.blocking}
+        """Reviewer-origin blockers the reviewer must reconcile (exact set).
+
+        Gate-origin (SYS-*) findings are excluded: their resolution evidence is
+        the deterministic gate itself, not a reviewer assessment.
+        """
+        return {
+            f.finding_id: f.state
+            for f in self.findings
+            if f.blocking and f.origin is FindingOrigin.REVIEWER
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -301,13 +353,19 @@ class LaneAuthorized:
 @dataclass(frozen=True)
 class AuthorResultAccepted:
     revision: int
+    commit: str
+    tree_digest: str
+    has_unknown_contracts: bool
     kind: str = field(default="AuthorResultAccepted", init=False)
 
 
 @dataclass(frozen=True)
 class FoldAccepted:
     revision: int
+    commit: str
+    tree_digest: str
     dispositions: tuple[tuple[str, Disposition], ...]
+    has_unknown_contracts: bool
     kind: str = field(default="FoldAccepted", init=False)
 
 
@@ -319,6 +377,7 @@ class RevisionVerified:
     no_foreign_commits: bool
     files_in_scope: bool
     worktree_clean: bool
+    failed_checks: tuple[str, ...]
     kind: str = field(default="RevisionVerified", init=False)
 
     @property
@@ -403,12 +462,21 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     if isinstance(event, LaneAuthorized):
         return {"kind": event.kind}
     if isinstance(event, AuthorResultAccepted):
-        return {"kind": event.kind, "revision": event.revision}
+        return {
+            "kind": event.kind,
+            "revision": event.revision,
+            "commit": event.commit,
+            "tree_digest": event.tree_digest,
+            "has_unknown_contracts": event.has_unknown_contracts,
+        }
     if isinstance(event, FoldAccepted):
         return {
             "kind": event.kind,
             "revision": event.revision,
+            "commit": event.commit,
+            "tree_digest": event.tree_digest,
             "dispositions": [[fid, disp.value] for fid, disp in event.dispositions],
+            "has_unknown_contracts": event.has_unknown_contracts,
         }
     if isinstance(event, RevisionVerified):
         return {
@@ -419,6 +487,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "no_foreign_commits": event.no_foreign_commits,
             "files_in_scope": event.files_in_scope,
             "worktree_clean": event.worktree_clean,
+            "failed_checks": list(event.failed_checks),
         }
     if isinstance(event, ReviewAccepted):
         return {
@@ -451,11 +520,19 @@ def event_from_dict(data: Mapping[str, Any]) -> Event:
     if kind == "LaneAuthorized":
         return LaneAuthorized()
     if kind == "AuthorResultAccepted":
-        return AuthorResultAccepted(revision=int(data["revision"]))
+        return AuthorResultAccepted(
+            revision=int(data["revision"]),
+            commit=data["commit"],
+            tree_digest=data["tree_digest"],
+            has_unknown_contracts=bool(data["has_unknown_contracts"]),
+        )
     if kind == "FoldAccepted":
         return FoldAccepted(
             revision=int(data["revision"]),
+            commit=data["commit"],
+            tree_digest=data["tree_digest"],
             dispositions=tuple((fid, Disposition(disp)) for fid, disp in data["dispositions"]),
+            has_unknown_contracts=bool(data["has_unknown_contracts"]),
         )
     if kind == "RevisionVerified":
         return RevisionVerified(
@@ -465,6 +542,7 @@ def event_from_dict(data: Mapping[str, Any]) -> Event:
             no_foreign_commits=bool(data["no_foreign_commits"]),
             files_in_scope=bool(data["files_in_scope"]),
             worktree_clean=bool(data["worktree_clean"]),
+            failed_checks=tuple(data["failed_checks"]),
         )
     if kind == "ReviewAccepted":
         return ReviewAccepted(
@@ -492,3 +570,63 @@ def event_from_dict(data: Mapping[str, Any]) -> Event:
     if kind == "ArtifactRejected":
         return ArtifactRejected(artifact=Awaiting(data["artifact"]))
     raise ValueError(f"unknown event kind: {kind!r}")
+
+
+# ---------------------------------------------------------------------------
+# Snapshot (de)serialization — the ledger records the COMPLETE snapshot so
+# replay can compare every field, not just the state name
+# ---------------------------------------------------------------------------
+
+
+def snapshot_to_dict(snapshot: LaneSnapshot) -> dict[str, Any]:
+    return {
+        "state": snapshot.state.value,
+        "awaiting": snapshot.awaiting.value if snapshot.awaiting is not None else None,
+        "revision": snapshot.revision,
+        "review_round": snapshot.review_round,
+        "agent_invocations": snapshot.agent_invocations,
+        "artifact_retries": snapshot.artifact_retries,
+        "current_sha": snapshot.current_sha,
+        "current_tree": snapshot.current_tree,
+        "findings": [
+            {
+                "finding_id": f.finding_id,
+                "severity": f.severity.value,
+                "title": f.title,
+                "state": f.state.value,
+                "origin": f.origin.value,
+                "repair_attempts": f.repair_attempts,
+                "guidance_given": f.guidance_given,
+                "consecutive_rejections": f.consecutive_rejections,
+                "reopen_count": f.reopen_count,
+            }
+            for f in snapshot.findings
+        ],
+    }
+
+
+def snapshot_from_dict(data: Mapping[str, Any]) -> LaneSnapshot:
+    return LaneSnapshot(
+        state=LaneState(data["state"]),
+        awaiting=Awaiting(data["awaiting"]) if data["awaiting"] is not None else None,
+        revision=int(data["revision"]),
+        review_round=int(data["review_round"]),
+        agent_invocations=int(data["agent_invocations"]),
+        artifact_retries=int(data["artifact_retries"]),
+        current_sha=data["current_sha"],
+        current_tree=data["current_tree"],
+        findings=tuple(
+            FindingRecord(
+                finding_id=f["finding_id"],
+                severity=Severity(f["severity"]),
+                title=f["title"],
+                state=FindingState(f["state"]),
+                origin=FindingOrigin(f["origin"]),
+                repair_attempts=int(f["repair_attempts"]),
+                guidance_given=bool(f["guidance_given"]),
+                consecutive_rejections=int(f["consecutive_rejections"]),
+                reopen_count=int(f["reopen_count"]),
+            )
+            for f in data["findings"]
+        ),
+    )

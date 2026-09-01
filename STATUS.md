@@ -4,12 +4,12 @@
 
 | Item | State |
 |---|---|
-| Repository | V0-A walking skeleton DELIVERED 2026-09-01 (manifest `manifests/v0a_walking_skeleton.yaml`) — awaiting Codex review |
+| Repository | V0-A walking skeleton rev 2 DELIVERED 2026-09-01 (manifest `manifests/v0a_walking_skeleton.yaml`) — Codex rev-1 review (8 P1) folded; awaiting Codex re-review |
 | Design | Governing design rev 3 (`103020f`, operator-approved architecture baseline for implementation) plus Python architecture, Project Control Plane, and review/repair protocol |
 | Build plan | T0 (target RVA JSON contract) still outstanding on the `trading-ai` side; V0-A done pending review; V0-B (real drivers, verify/land split, recovery, limits, console, `assist` commands) next |
 | First project | `projects/trading-ai-engine/` registered (migrated from the legacy `targets/trading-ai.yaml`, now deleted) -> `c:\Repos\trading-ai`, branch `development`; gate `BLOCKED_UNTIL_T0`; no Phase 9 manifest exists, so no live lane is startable |
 | Schemas | Four v2 external contracts published (`schemas/v2/`: author-result, fold, review, target-gate-result); v1 drafts retained as fixtures under `schemas/v1/` |
-| Suite | 201 tests passing locally (`python -m pytest -q --tb=short`, 2026-09-01); pyflakes clean; fakes only — no CLI, network, or target repo |
+| Suite | 241 tests passing locally (`python -m pytest -q --tb=short`, 2026-09-01); pyflakes clean; fakes only — no CLI, network, or target repo |
 
 ## V0-A slice contents (awaiting review)
 
@@ -29,10 +29,17 @@
 
 ## Review requests outstanding
 
-- **Codex:** review the V0-A slice `103020f..<tip>` against
-  `manifests/v0a_walking_skeleton.yaml` — determinism, fail-closed coverage,
-  ledger completeness, privilege minimalism, schema-contract fidelity
-  (architecture §7.2 v2 requirements), and Control Plane containment.
+- **Codex:** re-review the V0-A slice `103020f..<tip>` against
+  `manifests/v0a_walking_skeleton.yaml`. Rev 2 folds all eight rev-1 P1
+  findings (V0A-R1-01…08): lane/candidate identity binding on every artifact,
+  unknown-contract and gate-check consistency routing, persistence-filter
+  compatibility with the security checklist plus its FAIL/CLEAN rule, the SYS
+  gate-finding guidance/handoff/ping-pong lifecycle, Control-Plane-derived
+  containment-checked run paths and digest-bound invocations, full-evidence
+  ledger replay (complete snapshots, predicate inputs, effect protocol,
+  artifact digests, policy binding), required gate verdict/tree and finding
+  routing-flag schema fields, and non-URL connection-string/token rejection
+  with sanitized ledger errors.
 - Still pending from before: final Codex review of the rev-3 design fold, and
   the `trading-ai` branch `process/orchestrator-pointer-dev-ruling`.
 

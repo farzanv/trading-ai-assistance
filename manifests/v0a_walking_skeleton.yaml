@@ -11,11 +11,19 @@ owner: claude
 reviewer: codex
 scope_base: "103020f640e6ccfab2347ccab7018fa0b43a6bc2"
 status: >-
-  DELIVERED 2026-09-01 — awaiting Codex review. Fake drivers only: no real
-  claude/codex invocation, no live target execution, no landing, no push, no
-  DB/provider access, no limit handling, no external notifications. T0 (the
-  target RVA JSON contract) remains a prerequisite for any live lane; nothing
-  here parses the current human RVA output.
+  REV 2 DELIVERED 2026-09-01 — Codex rev-1 review (8 P1) folded; awaiting
+  Codex re-review. Fake drivers only: no real claude/codex invocation, no live
+  target execution, no landing, no push, no DB/provider access, no limit
+  handling, no external notifications. T0 (the target RVA JSON contract)
+  remains a prerequisite for any live lane; nothing here parses the current
+  human RVA output.
+
+review_rounds:
+  - round: 1
+    reviewer: codex
+    verdict: FINDINGS
+    findings: [V0A-R1-01, V0A-R1-02, V0A-R1-03, V0A-R1-04, V0A-R1-05, V0A-R1-06, V0A-R1-07, V0A-R1-08]
+    folded_in: rev 2 (all eight FOLDED)
 
 objective: >-
   The smallest complete deterministic loop, replayable from its own ledger:

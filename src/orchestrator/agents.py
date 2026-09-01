@@ -21,15 +21,29 @@ from orchestrator.model import AgentAction
 
 @dataclass(frozen=True)
 class InvocationSpec:
-    """Immutable envelope for one agent or gate invocation (architecture §6.1)."""
+    """Immutable envelope for one agent or gate invocation (architecture §6.1).
+
+    Binds the complete Control Plane context: project, work item, manifest,
+    exact base and candidate SHAs/tree, and the package/schema digests the
+    lane was authorized with — so every invocation is attributable to exactly
+    what it ran under.
+    """
 
     invocation_id: str
+    project_id: str
     lane_id: str
+    work_item: str
+    manifest: str
+    scope_base: str
+    current_sha: str
+    current_tree: str
     role: str  # "author" | "reviewer" | "gate"
     action: AgentAction | None
     review_round: int
     revision: int
     attempt: int  # 0 first try, 1 malformed-artifact retry
+    package_digests: tuple[tuple[str, str], ...]
+    schemas_digest: str
 
 
 @dataclass(frozen=True)

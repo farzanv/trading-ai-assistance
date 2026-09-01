@@ -1,14 +1,17 @@
 """Validation of the four v2 external artifacts and persistence safety.
 
 Every model- or gate-produced artifact passes JSON Schema validation plus the
-semantic checks the schema cannot express — exact-set reconciliation, lifecycle
-legality, verdict consistency (architecture §7.3) — before it can become a
-typed event. A failure raises :class:`ArtifactError`; the coordinator turns
-that into one retry, then a STOP.
+semantic checks the schema cannot express — binding to the immutable lane
+identity and the verified candidate revision, exact-set reconciliation,
+lifecycle legality, verdict/checklist consistency (architecture §7.3, §8) —
+before it can become a typed event. A failure raises :class:`ArtifactError`;
+the coordinator turns that into one retry, then a STOP.
 
 Persistence safety (design §7.1, architecture §7.4): structured artifacts are
 rejected when they carry credential-named fields or credential-shaped values,
-and diagnostic text is bounded to 1 MiB per invocation.
+diagnostic text is bounded to 1 MiB per invocation, and error evidence is
+sanitized (schema paths and keywords only — never raw instance values, which
+could echo a secret into the ledger).
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from orchestrator.model import (
     Disposition,
     FindingState,
     GateCategory,
+    LaneIdentity,
     LEGAL_PRIOR_OUTCOMES,
     Lens,
     NewFinding,
@@ -53,13 +57,36 @@ _FORBIDDEN_KEY_SEGMENTS = frozenset(
 _FORBIDDEN_WHOLE_KEYS = frozenset(
     {"api_key", "auth_file", "authorization", "connection_string", "access_key", "private_key", "env"}
 )
-#: Values that look like a URL with embedded password or key material.
-_FORBIDDEN_VALUE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^@\s]+@")
+#: Schema-approved field names that would otherwise trip the segment filter.
+#: Each entry names a published v2 contract field whose NAME contains a
+#: forbidden segment but whose VALUE is a structural check result, never a
+#: secret (the security checklist of design §7.1).
+_SCHEMA_APPROVED_KEYS = frozenset({"no_credential_logging"})
+
+#: Values that look like credential material: URL userinfo passwords,
+#: key=value connection-string/token assignments (ODBC/libpq style), bearer
+#: tokens, and private-key markers.
+_FORBIDDEN_VALUE_RES = (
+    re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^@\s]+@"),
+    re.compile(
+        r"(?i)\b(pwd|password|passwd|secret|token|apikey|api_key|accesskey|access_key|"
+        r"client_secret|clientsecret|sslpassword)\s*=\s*[^;\s]+"
+    ),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+)
 _PRIVATE_KEY_MARKER = "-----BEGIN "
+
+_ACCEPTING_GATE_CATEGORIES = frozenset(
+    {GateCategory.PASS, GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS}
+)
 
 
 class ArtifactError(Exception):
-    """The artifact is malformed, contradictory, or unsafe to persist."""
+    """The artifact is malformed, contradictory, unbound, or unsafe to persist.
+
+    ``errors`` is ledger-safe: schema failures are reported as path + keyword
+    only, and semantic messages never embed raw artifact string values.
+    """
 
     def __init__(self, artifact: str, errors: list[str]) -> None:
         self.artifact = artifact
@@ -70,21 +97,29 @@ class ArtifactError(Exception):
 @dataclass(frozen=True)
 class SchemaSet:
     validators: Mapping[str, Draft202012Validator]
+    digest: str  # sha256 over the sorted (name, file-digest) pairs
 
 
 def load_schema_set(schemas_dir: Path) -> SchemaSet:
     validators: dict[str, Draft202012Validator] = {}
-    for name, filename in _SCHEMA_FILES.items():
-        with (schemas_dir / filename).open(encoding="utf-8") as fh:
-            schema = json.load(fh)
+    file_digests: list[tuple[str, str]] = []
+    for name, filename in sorted(_SCHEMA_FILES.items()):
+        content = (schemas_dir / filename).read_bytes()
+        schema = json.loads(content.decode("utf-8"))
         Draft202012Validator.check_schema(schema)
         validators[name] = Draft202012Validator(schema)
-    return SchemaSet(validators=validators)
+        file_digests.append((name, hashlib.sha256(content).hexdigest()))
+    canonical = json.dumps(file_digests, sort_keys=True, separators=(",", ":"))
+    return SchemaSet(
+        validators=validators, digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    )
 
 
 def _schema_validate(schemas: SchemaSet, artifact: str, raw: Mapping[str, Any]) -> None:
+    # Sanitized: path + failed keyword only. jsonschema's message text embeds
+    # instance values, which must never reach the ledger.
     errors = [
-        f"{'/'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
+        f"{'/'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.validator}"
         for e in schemas.validators[artifact].iter_errors(raw)
     ]
     if errors:
@@ -107,8 +142,9 @@ def check_persistence_safety(artifact: str, raw: Any, _path: str = "") -> None:
         for key, value in raw.items():
             key_path = f"{_path}/{key}"
             lowered = str(key).lower()
-            if lowered in _FORBIDDEN_WHOLE_KEYS or (
-                set(lowered.split("_")) & _FORBIDDEN_KEY_SEGMENTS
+            if lowered not in _SCHEMA_APPROVED_KEYS and (
+                lowered in _FORBIDDEN_WHOLE_KEYS
+                or (set(lowered.split("_")) & _FORBIDDEN_KEY_SEGMENTS)
             ):
                 raise ArtifactError(artifact, [f"forbidden credential-named field: {key_path}"])
             check_persistence_safety(artifact, value, key_path)
@@ -116,10 +152,9 @@ def check_persistence_safety(artifact: str, raw: Any, _path: str = "") -> None:
         for index, item in enumerate(raw):
             check_persistence_safety(artifact, item, f"{_path}[{index}]")
     elif isinstance(raw, str):
-        if _FORBIDDEN_VALUE_RE.search(raw):
-            raise ArtifactError(
-                artifact, [f"credential-shaped value (URL with embedded secret) at {_path}"]
-            )
+        for pattern in _FORBIDDEN_VALUE_RES:
+            if pattern.search(raw):
+                raise ArtifactError(artifact, [f"credential-shaped value at {_path}"])
         if _PRIVATE_KEY_MARKER in raw:
             raise ArtifactError(artifact, [f"key material marker at {_path}"])
 
@@ -146,13 +181,16 @@ class AuthorResultSummary:
     commit: str
     revision: int
     tree_digest: str
+    has_unknown_contracts: bool
 
 
 @dataclass(frozen=True)
 class FoldSummary:
     commit: str
     revision: int
+    tree_digest: str
     dispositions: tuple[tuple[str, Disposition], ...]
+    has_unknown_contracts: bool
 
 
 @dataclass(frozen=True)
@@ -171,37 +209,62 @@ class GuidanceSummary:
     finding_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class GateSummary:
+    category: GateCategory
+    verdict: str
+    failed_checks: tuple[str, ...]
+
+
 # ---------------------------------------------------------------------------
-# Validators (schema + semantics)
+# Validators (schema + identity binding + semantics)
 # ---------------------------------------------------------------------------
 
 
 def validate_author_result(
-    schemas: SchemaSet, raw: Mapping[str, Any], expected_revision: int
+    schemas: SchemaSet,
+    raw: Mapping[str, Any],
+    identity: LaneIdentity,
+    expected_revision: int,
 ) -> AuthorResultSummary:
     check_persistence_safety("author-result", raw)
     _schema_validate(schemas, "author-result", raw)
+    errors: list[str] = []
+    if raw["work_item"] != identity.work_item:
+        errors.append("work_item does not match the authorized lane")
+    if raw["scope_base"] != identity.scope_base:
+        errors.append("scope_base does not match the authorized lane")
     if raw["revision"] != expected_revision:
-        raise ArtifactError(
-            "author-result",
-            [f"revision {raw['revision']} != expected {expected_revision}"],
-        )
+        errors.append(f"revision {raw['revision']} != expected {expected_revision}")
+    if raw["commit"] == identity.scope_base:
+        errors.append("commit equals scope_base (no new revision)")
+    if errors:
+        raise ArtifactError("author-result", errors)
     return AuthorResultSummary(
-        commit=raw["commit"], revision=raw["revision"], tree_digest=raw["tree_digest"]
+        commit=raw["commit"],
+        revision=raw["revision"],
+        tree_digest=raw["tree_digest"],
+        has_unknown_contracts=bool(raw.get("unknown_contracts")),
     )
 
 
 def validate_fold(
     schemas: SchemaSet,
     raw: Mapping[str, Any],
+    identity: LaneIdentity,
     outstanding_ids: frozenset[str],
     expected_revision: int,
+    prev_sha: str,
 ) -> FoldSummary:
     check_persistence_safety("fold", raw)
     _schema_validate(schemas, "fold", raw)
     errors: list[str] = []
     if raw["revision"] != expected_revision:
         errors.append(f"revision {raw['revision']} != expected {expected_revision}")
+    if raw["folded_review_range"] != f"{identity.scope_base}..{prev_sha}":
+        errors.append("folded_review_range does not match the reviewed lane range")
+    if raw["commit"] in {prev_sha, identity.scope_base}:
+        errors.append("commit is not a new revision")
     seen: list[str] = [d["finding_id"] for d in raw["dispositions"]]
     duplicates = sorted({fid for fid in seen if seen.count(fid) > 1})
     if duplicates:
@@ -217,18 +280,43 @@ def validate_fold(
     dispositions = tuple(
         (d["finding_id"], Disposition(d["disposition"])) for d in raw["dispositions"]
     )
-    return FoldSummary(commit=raw["commit"], revision=raw["revision"], dispositions=dispositions)
+    return FoldSummary(
+        commit=raw["commit"],
+        revision=raw["revision"],
+        tree_digest=raw["tree_digest"],
+        dispositions=dispositions,
+        has_unknown_contracts=bool(raw.get("unknown_contracts")),
+    )
+
+
+def _check_review_binding(
+    raw: Mapping[str, Any],
+    identity: LaneIdentity,
+    current_sha: str,
+    current_tree: str,
+    errors: list[str],
+) -> None:
+    if raw["reviewed_range"] != f"{identity.scope_base}..{current_sha}":
+        errors.append("reviewed_range does not match the verified lane range")
+    if raw["tree_digest"] != current_tree:
+        errors.append("tree_digest does not match the verified revision")
+    if raw["manifest"] != identity.manifest:
+        errors.append("manifest does not match the authorized lane")
 
 
 def validate_review(
     schemas: SchemaSet,
     raw: Mapping[str, Any],
+    identity: LaneIdentity,
     expected_lens: Lens,
     historical: Mapping[str, FindingState],
+    current_sha: str,
+    current_tree: str,
 ) -> ReviewSummary:
     check_persistence_safety("review", raw)
     _schema_validate(schemas, "review", raw)
     errors: list[str] = []
+    _check_review_binding(raw, identity, current_sha, current_tree, errors)
     if raw["lens"] != expected_lens.value:
         errors.append(f"lens {raw['lens']!r} != expected {expected_lens.value!r}")
 
@@ -276,6 +364,15 @@ def validate_review(
         errors.append("verdict CLEAN with open blocking evidence")
     if raw["verdict"] == "FINDINGS" and clean_expected and raw["lens"] == Lens.GATING.value:
         errors.append("verdict FINDINGS without any blocking finding or unresolved prior")
+    security = raw.get("security")
+    if security is not None:
+        failed_items = sorted(
+            name for name, item in security.items() if item["result"] == "FAIL"
+        )
+        if failed_items and clean_expected:
+            errors.append(
+                f"security checklist FAIL without blocking finding evidence: {failed_items}"
+            )
     if errors:
         raise ArtifactError("review", errors)
 
@@ -284,9 +381,9 @@ def validate_review(
             finding_id=f["id"],
             severity=Severity(f["severity"]),
             title=f["title"],
-            requires_ruling=bool(f.get("requires_ruling", False)),
-            earlier_phase_gap=f.get("earlier_phase_gap") is not None,
-            unknown_contract=bool(f.get("unknown_contract", False)),
+            requires_ruling=bool(f["requires_ruling"]),
+            earlier_phase_gap=f["earlier_phase_gap"] is not None,
+            unknown_contract=bool(f["unknown_contract"]),
         )
         for f in raw["findings"]
     )
@@ -309,12 +406,18 @@ def validate_review(
 
 
 def validate_guidance(
-    schemas: SchemaSet, raw: Mapping[str, Any], expected_finding_ids: frozenset[str]
+    schemas: SchemaSet,
+    raw: Mapping[str, Any],
+    identity: LaneIdentity,
+    expected_finding_ids: frozenset[str],
+    current_sha: str,
+    current_tree: str,
 ) -> GuidanceSummary:
     """Guidance is a review/v2 artifact with ``lens: guidance`` and no code."""
     check_persistence_safety("guidance", raw)
     _schema_validate(schemas, "review", raw)
     errors: list[str] = []
+    _check_review_binding(raw, identity, current_sha, current_tree, errors)
     if raw["lens"] != Lens.GUIDANCE.value:
         errors.append(f"lens {raw['lens']!r} != expected 'guidance'")
     guidance = raw.get("guidance")
@@ -331,7 +434,34 @@ def validate_guidance(
     return GuidanceSummary(finding_ids=tuple(sorted(guidance["finding_ids"])))
 
 
-def validate_gate_result(schemas: SchemaSet, raw: Mapping[str, Any]) -> GateCategory:
+def validate_gate_result(
+    schemas: SchemaSet,
+    raw: Mapping[str, Any],
+    identity: LaneIdentity,
+    current_sha: str,
+    current_tree: str,
+) -> GateSummary:
     check_persistence_safety("target-gate-result", raw)
     _schema_validate(schemas, "target-gate-result", raw)
-    return GateCategory(raw["category"])
+    errors: list[str] = []
+    if raw["resolved_range"] != f"{identity.scope_base}..{current_sha}":
+        errors.append("resolved_range does not match the verified lane range")
+    if raw["tree_digest"] != current_tree:
+        errors.append("tree_digest does not match the verified revision")
+    if raw["manifest"] != identity.manifest:
+        errors.append("manifest does not match the authorized lane")
+    category = GateCategory(raw["category"])
+    failed_checks = tuple(
+        sorted(check["name"] for check in raw["checks"] if check["result"] == "FAIL")
+    )
+    if category in _ACCEPTING_GATE_CATEGORIES and failed_checks:
+        errors.append(f"accepting category with FAIL checks: {list(failed_checks)}")
+    if (
+        category not in _ACCEPTING_GATE_CATEGORIES
+        and category is not GateCategory.UNKNOWN
+        and not failed_checks
+    ):
+        errors.append("failing category without any FAIL check")
+    if errors:
+        raise ArtifactError("target-gate-result", errors)
+    return GateSummary(category=category, verdict=raw["verdict"], failed_checks=failed_checks)

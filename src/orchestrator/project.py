@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,17 @@ import yaml
 
 class ProjectError(Exception):
     """Registry/config/work-index loading failed. Fail closed; never guess."""
+
+
+#: Safe identifier for run/lane IDs: no path separators, no traversal, no
+#: reserved names — an identifier is never allowed to steer a filesystem path.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def validate_identifier(kind: str, value: str) -> str:
+    if not _SAFE_ID_RE.fullmatch(value) or ".." in value:
+        raise ProjectError(f"unsafe {kind} identifier: {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,28 @@ class ProjectConfig:
 
     def state_root(self) -> Path:
         return self.root / "state"
+
+    def run_dir(self, run_id: str) -> Path:
+        """Containment-checked project-local run directory (PCP §2, §9).
+
+        Every runtime record of a run lives below this project's own
+        ``state/runs/<run-id>/``; an identifier that would resolve anywhere
+        else fails closed.
+        """
+        validate_identifier("run", run_id)
+        state_root = self.state_root().resolve()
+        run_dir = (state_root / "runs" / run_id).resolve()
+        if not run_dir.is_relative_to(state_root / "runs"):
+            raise ProjectError(f"run directory escapes the project state root: {run_id!r}")
+        return run_dir
+
+    def work_item(self, work_id: str) -> WorkItem:
+        for item in self.work_items:
+            if item.work_id == work_id:
+                return item
+        raise ProjectError(
+            f"work item {work_id!r} is not declared in {self.project_id}'s work index"
+        )
 
 
 def _sha256_file(path: Path) -> str:

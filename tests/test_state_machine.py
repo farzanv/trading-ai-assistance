@@ -10,6 +10,8 @@ from orchestrator.model import (
     ArtifactRejected,
     AuthorResultAccepted,
     Awaiting,
+    Disposition,
+    FindingOrigin,
     FindingRecord,
     FindingState,
     FoldAccepted,
@@ -51,7 +53,31 @@ def verified(category: GateCategory = GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS,
         worktree_clean=True,
     )
     defaults.update(facts)
-    return RevisionVerified(gate_category=category, **defaults)
+    failed = () if category in (GateCategory.PASS, GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS, GateCategory.UNKNOWN) else ("scope",)
+    return RevisionVerified(gate_category=category, failed_checks=failed, **defaults)
+
+
+def author_accepted(revision: int = 1, unknown: bool = False) -> AuthorResultAccepted:
+    return AuthorResultAccepted(
+        revision=revision,
+        commit=f"{revision:040x}",
+        tree_digest=f"{revision + 5000:040x}",
+        has_unknown_contracts=unknown,
+    )
+
+
+def fold_accepted(
+    revision: int = 2,
+    dispositions: tuple = (),
+    unknown: bool = False,
+) -> FoldAccepted:
+    return FoldAccepted(
+        revision=revision,
+        commit=f"{revision:040x}",
+        tree_digest=f"{revision + 5000:040x}",
+        dispositions=dispositions,
+        has_unknown_contracts=unknown,
+    )
 
 
 def clean_review(prior: dict[str, PriorOutcome] | None = None) -> ReviewAccepted:
@@ -77,8 +103,8 @@ def finding(
 
 SAMPLE_EVENTS = {
     LaneAuthorized: LaneAuthorized(),
-    AuthorResultAccepted: AuthorResultAccepted(revision=1),
-    FoldAccepted: FoldAccepted(revision=2, dispositions=()),
+    AuthorResultAccepted: author_accepted(),
+    FoldAccepted: fold_accepted(),
     RevisionVerified: verified(),
     ReviewAccepted: clean_review(),
     GuidanceAccepted: GuidanceAccepted(finding_ids=()),
@@ -124,15 +150,38 @@ def test_authorized_lane_invokes_author_and_counts_the_invocation() -> None:
     assert decision.snapshot.agent_invocations == 1
 
 
-def test_author_result_moves_to_verifying() -> None:
+def test_author_result_moves_to_verifying_and_pins_the_candidate() -> None:
     snapshot = LaneSnapshot(
         state=LaneState.AUTHORING, awaiting=Awaiting.AUTHOR_RESULT, agent_invocations=1
     )
-    decision = reduce(snapshot, AuthorResultAccepted(revision=1), DESIGN_POLICY)
+    event = author_accepted()
+    decision = reduce(snapshot, event, DESIGN_POLICY)
     assert decision.snapshot.state is LaneState.VERIFYING
     assert decision.snapshot.revision == 1
+    assert decision.snapshot.current_sha == event.commit
+    assert decision.snapshot.current_tree == event.tree_digest
     assert decision.command == VerifyRevision()
     assert decision.snapshot.agent_invocations == 1  # verify spawns no agent
+
+
+def test_author_unknown_contract_waits_for_the_operator() -> None:
+    snapshot = LaneSnapshot(state=LaneState.AUTHORING, awaiting=Awaiting.AUTHOR_RESULT)
+    decision = reduce(snapshot, author_accepted(unknown=True), DESIGN_POLICY)
+    assert decision.snapshot.state is LaneState.WAIT_OPERATOR
+    assert decision.reason is ReasonCode.UNKNOWN_CONTRACT
+
+
+def test_fold_unknown_contract_report_waits_for_the_operator() -> None:
+    snapshot = LaneSnapshot(
+        state=LaneState.REPAIRING,
+        awaiting=Awaiting.FOLD,
+        revision=1,
+        findings=(finding("F1"),),
+    )
+    event = fold_accepted(dispositions=(("F1", Disposition.FOLDED),), unknown=True)
+    decision = reduce(snapshot, event, DESIGN_POLICY)
+    assert decision.snapshot.state is LaneState.WAIT_OPERATOR
+    assert decision.reason is ReasonCode.UNKNOWN_CONTRACT
 
 
 def test_accepted_gate_moves_to_review_and_counts_the_round() -> None:
@@ -172,6 +221,10 @@ def test_fixable_gate_creates_system_finding_and_requests_repair() -> None:
     assert decision.reason is ReasonCode.GATE_FIXABLE
     record = decision.snapshot.finding("SYS-FIXABLE_LINT")
     assert record is not None and record.state is FindingState.OPEN and record.blocking
+    assert record.origin is FindingOrigin.GATE
+    # Gate-origin findings are the gate's to verify, never the reviewer's.
+    assert "SYS-FIXABLE_LINT" not in decision.snapshot.historical_blocking_states()
+    assert "SYS-FIXABLE_LINT" in decision.snapshot.fold_outstanding_ids()
 
 
 @pytest.mark.parametrize(
@@ -348,7 +401,7 @@ def test_max_invocations_trips_to_stop() -> None:
 def test_every_agent_command_increments_the_counter_exactly_once() -> None:
     # author (1) -> verify (0) -> review (1) -> repair (1) -> guidance (1)
     d1 = reduce(LaneSnapshot(), LaneAuthorized(), DESIGN_POLICY)
-    d2 = reduce(d1.snapshot, AuthorResultAccepted(revision=1), DESIGN_POLICY)
+    d2 = reduce(d1.snapshot, author_accepted(), DESIGN_POLICY)
     d3 = reduce(d2.snapshot, verified(), DESIGN_POLICY)
     event = ReviewAccepted(
         lens=Lens.GATING,

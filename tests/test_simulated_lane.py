@@ -3,7 +3,8 @@
 author -> verify -> review (findings) -> repair -> verify -> review
 (one finding still present) -> no-code guidance -> repair -> verify ->
 final review -> convergence. No prose routes anything; the run ends at
-convergence with no landing effect (V0-A boundary).
+convergence with no landing effect (V0-A boundary). Every artifact is bound
+to the lane identity and the verified candidate revision.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orchestrator.application import LaneCoordinator
 from orchestrator.artifacts import load_schema_set
 from orchestrator.ledger import read_entries, replay
 from orchestrator.model import FindingState, GateCategory, LanePolicy, LaneState, ReasonCode
@@ -20,11 +20,13 @@ from tests.fakes import (
     ScriptedAuthor,
     ScriptedGate,
     ScriptedReviewer,
+    build_coordinator,
     make_author_result,
     make_finding,
     make_fold,
     make_guidance,
     make_review,
+    tree,
 )
 
 SCHEMAS = load_schema_set(Path(__file__).resolve().parents[1] / "schemas" / "v2")
@@ -37,7 +39,24 @@ POLICY = LanePolicy(
 CLOCK = lambda: "2026-09-01T00:00:00+00:00"  # noqa: E731 - fixed clock; never a reducer input
 
 
-def build_walking_skeleton(tmp_path: Path) -> LaneCoordinator:
+def coordinator_for(tmp_path: Path, *, lane_id: str, author, reviewer, gate):
+    return build_coordinator(
+        tmp_path,
+        lane_id=lane_id,
+        policy=POLICY,
+        schemas=SCHEMAS,
+        author=author,
+        reviewer=reviewer,
+        gate=gate,
+        clock=CLOCK,
+    )
+
+
+def artifacts_dir_for(ledger_path: Path, lane_id: str) -> Path:
+    return ledger_path.parent / "lanes" / lane_id / "artifacts"
+
+
+def build_walking_skeleton(tmp_path: Path):
     author = ScriptedAuthor(
         author_results=[make_author_result(revision=1)],
         folds=[
@@ -71,15 +90,8 @@ def build_walking_skeleton(tmp_path: Path) -> LaneCoordinator:
         ],
         guidances=[make_guidance(["F2"], revision=2)],
     )
-    return LaneCoordinator(
-        lane_id="LANE-SIM",
-        policy=POLICY,
-        schemas=SCHEMAS,
-        author=author,
-        reviewer=reviewer,
-        gate=ScriptedGate(),
-        run_dir=tmp_path / "run",
-        clock=CLOCK,
+    return coordinator_for(
+        tmp_path, lane_id="LANE-SIM", author=author, reviewer=reviewer, gate=ScriptedGate()
     )
 
 
@@ -93,6 +105,7 @@ def test_simulated_lane_reaches_convergence_without_prose_routing(tmp_path: Path
     assert snapshot.review_round == 3
     # author, review, repair, review, guidance, repair, review = 7 spawned agents
     assert snapshot.agent_invocations == 7
+    assert snapshot.current_tree == tree(3)  # the converged candidate is pinned
 
     f1, f2, f3 = snapshot.finding("F1"), snapshot.finding("F2"), snapshot.finding("F3")
     assert f1.state is FindingState.VERIFIED_RESOLVED
@@ -106,6 +119,8 @@ def test_simulated_lane_ledger_is_complete_and_replayable(tmp_path: Path) -> Non
     result = coordinator.run()
 
     entries = read_entries(result.ledger_path)
+    assert entries[0].payload["effect"] == "LANE_OPENED"
+    assert entries[0].payload["work_item"] == "sim_phase"
     decisions = [e for e in entries if e.kind == "DECISION"]
     effects = [e for e in entries if e.kind == "EFFECT"]
 
@@ -114,14 +129,14 @@ def test_simulated_lane_ledger_is_complete_and_replayable(tmp_path: Path) -> Non
     assert ReasonCode.GUIDANCE_REQUIRED.value in reasons
     assert ReasonCode.GUIDANCE_ACCEPTED.value in reasons
 
-    planned = [e.payload for e in effects if e.payload["effect"] == "INVOCATION_PLANNED"]
+    planned = [e.payload for e in effects if e.payload.get("effect") == "INVOCATION_PLANNED"]
     counted = [p for p in planned if p["counted"]]
     assert len(counted) == 7  # every spawned agent process is ledgered exactly once
     assert [p["invocation_number"] for p in counted] == list(range(1, 8))
     gate_runs = [p for p in planned if p["role"] == "gate"]
     assert len(gate_runs) == 3 and all(not p["counted"] for p in gate_runs)
 
-    accepted = [e.payload for e in effects if e.payload["effect"] == "ARTIFACT_ACCEPTED"]
+    accepted = [e.payload for e in effects if e.payload.get("effect") == "ARTIFACT_ACCEPTED"]
     assert all("digest" in a and len(a["digest"]) == 64 for a in accepted)
     assert {a["artifact"] for a in accepted} == {
         "author-result",
@@ -130,11 +145,12 @@ def test_simulated_lane_ledger_is_complete_and_replayable(tmp_path: Path) -> Non
         "guidance",
         "target-gate-result",
     }
-    assert [e.payload for e in effects if e.payload["effect"] == "RUN_END"][0]["end"] == (
+    assert [e.payload for e in effects if e.payload.get("effect") == "RUN_END"][0]["end"] == (
         "CONVERGED_V0A_NO_LANDING"
     )
 
-    # Replay re-runs the pure reducer over the recorded events: same states.
+    # Replay re-runs the pure reducer over every recorded event, enforces the
+    # effect protocol, and re-verifies every persisted artifact digest.
     assert replay(result.ledger_path, POLICY) == result.snapshot
 
 
@@ -150,25 +166,31 @@ def test_two_identical_runs_are_deterministic(tmp_path: Path) -> None:
 
 def test_p3_backlog_artifact_is_written_not_folded(tmp_path: Path) -> None:
     coordinator = build_walking_skeleton(tmp_path)
-    coordinator.run()
+    result = coordinator.run()
     backlog = json.loads(
-        (tmp_path / "run" / "artifacts" / "p3-backlog.json").read_text(encoding="utf-8")
+        (artifacts_dir_for(result.ledger_path, "LANE-SIM") / "p3-backlog.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert backlog["findings"] == [{"id": "F3", "severity": "P3", "title": "finding F3"}]
+
+
+def test_run_state_stays_inside_the_project_state_root(tmp_path: Path) -> None:
+    coordinator = build_walking_skeleton(tmp_path)
+    result = coordinator.run()
+    state_root = (tmp_path / "control-plane" / "projects" / "sim-project" / "state").resolve()
+    assert result.ledger_path.resolve().is_relative_to(state_root / "runs" / "RUN-001")
 
 
 def test_malformed_review_is_retried_once_then_accepted(tmp_path: Path) -> None:
     malformed = make_review(revision=1, verdict="CLEAN")
     malformed["verdict"] = "LOOKS_FINE"  # schema violation
-    coordinator = LaneCoordinator(
+    coordinator = coordinator_for(
+        tmp_path,
         lane_id="LANE-RETRY",
-        policy=POLICY,
-        schemas=SCHEMAS,
         author=ScriptedAuthor(author_results=[make_author_result()]),
         reviewer=ScriptedReviewer(reviews=[malformed, make_review(revision=1, verdict="CLEAN")]),
         gate=ScriptedGate(),
-        run_dir=tmp_path / "run",
-        clock=CLOCK,
     )
     result = coordinator.run()
     assert result.snapshot.state is LaneState.LANDING
@@ -177,7 +199,7 @@ def test_malformed_review_is_retried_once_then_accepted(tmp_path: Path) -> None:
     rejected = [
         e.payload
         for e in read_entries(result.ledger_path)
-        if e.kind == "EFFECT" and e.payload["effect"] == "ARTIFACT_REJECTED"
+        if e.kind == "EFFECT" and e.payload.get("effect") == "ARTIFACT_REJECTED"
     ]
     assert len(rejected) == 1 and rejected[0]["artifact"] == "review"
 
@@ -185,15 +207,12 @@ def test_malformed_review_is_retried_once_then_accepted(tmp_path: Path) -> None:
 def test_second_malformed_review_stops_the_lane(tmp_path: Path) -> None:
     malformed = make_review(revision=1, verdict="CLEAN")
     malformed["verdict"] = "LOOKS_FINE"
-    coordinator = LaneCoordinator(
+    coordinator = coordinator_for(
+        tmp_path,
         lane_id="LANE-STOP",
-        policy=POLICY,
-        schemas=SCHEMAS,
         author=ScriptedAuthor(author_results=[make_author_result()]),
         reviewer=ScriptedReviewer(reviews=[malformed, dict(malformed)]),
         gate=ScriptedGate(),
-        run_dir=tmp_path / "run",
-        clock=CLOCK,
     )
     result = coordinator.run()
     assert result.snapshot.state is LaneState.STOPPED
@@ -203,11 +222,59 @@ def test_second_malformed_review_stops_the_lane(tmp_path: Path) -> None:
     assert replay(result.ledger_path, POLICY).state is LaneState.STOPPED
 
 
+def test_unbound_review_naming_a_foreign_revision_stops_the_lane(tmp_path: Path) -> None:
+    """A review of the wrong range/tree is malformed, never silently adopted."""
+    foreign = make_review(revision=7, verdict="CLEAN")  # not the verified candidate
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-UNBOUND",
+        author=ScriptedAuthor(author_results=[make_author_result()]),
+        reviewer=ScriptedReviewer(reviews=[foreign, dict(foreign)]),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED
+    rejected = [
+        e.payload
+        for e in read_entries(result.ledger_path)
+        if e.kind == "EFFECT" and e.payload.get("effect") == "ARTIFACT_REJECTED"
+    ]
+    assert len(rejected) == 2 and all(r["artifact"] == "review" for r in rejected)
+
+
+def test_author_unknown_contract_opens_a_human_gate(tmp_path: Path) -> None:
+    raw = make_author_result(
+        unknown_contracts=[
+            {
+                "provider": "FMP",
+                "endpoint": "/v4/thing",
+                "question": "paging rule not established",
+                "consulted": ["pinned docs"],
+                "would_settle": "an audited capture",
+            }
+        ]
+    )
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-UC",
+        author=ScriptedAuthor(author_results=[raw]),
+        reviewer=ScriptedReviewer(),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.WAIT_OPERATOR
+    end = [
+        e.payload
+        for e in read_entries(result.ledger_path)
+        if e.kind == "EFFECT" and e.payload.get("effect") == "RUN_END"
+    ][0]
+    assert end["end"] == "HUMAN_GATE" and end["reason"] == ReasonCode.UNKNOWN_CONTRACT.value
+
+
 def test_requires_ruling_review_opens_a_human_gate(tmp_path: Path) -> None:
-    coordinator = LaneCoordinator(
+    coordinator = coordinator_for(
+        tmp_path,
         lane_id="LANE-GATE",
-        policy=POLICY,
-        schemas=SCHEMAS,
         author=ScriptedAuthor(author_results=[make_author_result()]),
         reviewer=ScriptedReviewer(
             reviews=[
@@ -219,15 +286,13 @@ def test_requires_ruling_review_opens_a_human_gate(tmp_path: Path) -> None:
             ]
         ),
         gate=ScriptedGate(),
-        run_dir=tmp_path / "run",
-        clock=CLOCK,
     )
     result = coordinator.run()
     assert result.snapshot.state is LaneState.WAIT_OPERATOR
     end = [
         e.payload
         for e in read_entries(result.ledger_path)
-        if e.kind == "EFFECT" and e.payload["effect"] == "RUN_END"
+        if e.kind == "EFFECT" and e.payload.get("effect") == "RUN_END"
     ][0]
     assert end["end"] == "HUMAN_GATE" and end["reason"] == ReasonCode.REQUIRES_RULING.value
 
@@ -248,15 +313,12 @@ def test_max_rounds_exhaustion_stops_never_forces_acceptance(tmp_path: Path) -> 
             )
         )
         folds.append(make_fold(revision=n + 1, dispositions={f"F{n}": "FOLDED"}))
-    coordinator = LaneCoordinator(
+    coordinator = coordinator_for(
+        tmp_path,
         lane_id="LANE-ROUNDS",
-        policy=POLICY,
-        schemas=SCHEMAS,
         author=ScriptedAuthor(author_results=[make_author_result()], folds=folds),
         reviewer=ScriptedReviewer(reviews=reviews),
         gate=ScriptedGate(),
-        run_dir=tmp_path / "run",
-        clock=CLOCK,
     )
     result = coordinator.run()
     assert result.snapshot.state is LaneState.STOPPED

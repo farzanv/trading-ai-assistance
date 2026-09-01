@@ -18,7 +18,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "severity", "title", "description", "required_change"],
+        "required": ["id", "severity", "section", "title", "description", "required_change", "requires_ruling", "earlier_phase_gap", "blocks_downstream", "unknown_contract"],
         "properties": {
           "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "stable for the life of the lane; reused when reopened" },
           "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
@@ -46,10 +46,10 @@
               "permanent_test_shape": { "type": "string" }
             }
           },
-          "requires_ruling": { "type": "boolean", "default": false },
-          "earlier_phase_gap": { "type": ["string", "null"], "default": null, "description": "e.g. \"phase7:§3.3\" — STOP; earlier phase amended first" },
-          "blocks_downstream": { "type": "boolean", "default": false },
-          "unknown_contract": { "type": "boolean", "default": false, "description": "provider/API contract not established — guessing prohibited" }
+          "requires_ruling": { "type": "boolean" },
+          "earlier_phase_gap": { "type": ["string", "null"], "description": "e.g. \"phase7:§3.3\" — STOP; earlier phase amended first" },
+          "blocks_downstream": { "type": "boolean" },
+          "unknown_contract": { "type": "boolean", "description": "provider/API contract not established — guessing prohibited" }
         },
         "if": { "properties": { "severity": { "enum": ["P0", "P1", "P2"] } } },
         "then": { "required": ["root_cause", "consequence", "recommended_approach", "closure_evidence"] }

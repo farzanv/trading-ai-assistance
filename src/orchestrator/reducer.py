@@ -22,6 +22,7 @@ from orchestrator.model import (
     Command,
     Disposition,
     Event,
+    FindingOrigin,
     FindingRecord,
     FindingState,
     FoldAccepted,
@@ -173,18 +174,25 @@ def _on_lane_authorized(
 def _on_author_result(
     snapshot: LaneSnapshot, event: AuthorResultAccepted, policy: LanePolicy
 ) -> TransitionDecision:
-    next_snapshot = replace(
+    working = replace(
         snapshot,
-        state=LaneState.VERIFYING,
-        awaiting=Awaiting.GATE_RESULT,
         revision=event.revision,
+        current_sha=event.commit,
+        current_tree=event.tree_digest,
         artifact_retries=0,
     )
+    inputs = {
+        "revision": event.revision,
+        "commit": event.commit,
+        "tree_digest": event.tree_digest,
+        "has_unknown_contracts": event.has_unknown_contracts,
+    }
+    if event.has_unknown_contracts:
+        # Guessing a provider contract is prohibited; package for the operator.
+        return _wait_operator(working, ReasonCode.UNKNOWN_CONTRACT, inputs)
+    next_snapshot = replace(working, state=LaneState.VERIFYING, awaiting=Awaiting.GATE_RESULT)
     return TransitionDecision(
-        next_snapshot,
-        VerifyRevision(),
-        ReasonCode.AUTHOR_RESULT_ACCEPTED,
-        {"revision": event.revision},
+        next_snapshot, VerifyRevision(), ReasonCode.AUTHOR_RESULT_ACCEPTED, inputs
     )
 
 
@@ -216,10 +224,20 @@ def _on_fold(snapshot: LaneSnapshot, event: FoldAccepted, policy: LanePolicy) ->
         # UNKNOWN_CONTRACT / REQUIRES_SCOPE_EXPANSION / REQUIRES_OPERATOR_ACTION
         # keep the finding state; the lane waits for the operator below.
         findings = _replace_finding(findings, record)
-    working = replace(snapshot, findings=findings, revision=event.revision, artifact_retries=0)
+    working = replace(
+        snapshot,
+        findings=findings,
+        revision=event.revision,
+        current_sha=event.commit,
+        current_tree=event.tree_digest,
+        artifact_retries=0,
+    )
     inputs: dict[str, Any] = {
         "revision": event.revision,
+        "commit": event.commit,
+        "tree_digest": event.tree_digest,
         "dispositions": {fid: disp.value for fid, disp in event.dispositions},
+        "has_unknown_contracts": event.has_unknown_contracts,
     }
 
     adjudication = [f.finding_id for f in working.findings if f.consecutive_rejections >= 2]
@@ -228,6 +246,10 @@ def _on_fold(snapshot: LaneSnapshot, event: FoldAccepted, policy: LanePolicy) ->
             working, ReasonCode.ADJUDICATION_REQUIRED, dict(inputs, finding_ids=adjudication)
         )
     dispositions = {disp for _, disp in event.dispositions}
+    if event.has_unknown_contracts and Disposition.UNKNOWN_CONTRACT not in dispositions:
+        # A top-level unknown-contract report is a STOP even without a
+        # matching per-finding disposition.
+        return _wait_operator(working, ReasonCode.UNKNOWN_CONTRACT, inputs)
     for disposition, reason in _WAIT_OPERATOR_DISPOSITIONS:
         if disposition in dispositions:
             return _wait_operator(working, reason, inputs)
@@ -271,13 +293,25 @@ def _on_revision_verified(
         "no_foreign_commits": event.no_foreign_commits,
         "files_in_scope": event.files_in_scope,
         "worktree_clean": event.worktree_clean,
+        "failed_checks": list(event.failed_checks),
     }
     if not event.git_facts_ok:
         return _stopped(snapshot, ReasonCode.GIT_FACTS_FAILED, inputs)
     category = event.gate_category
     if category in policy.accepted_gate_categories:
+        # The passing gate IS the resolution evidence for gate-origin findings
+        # whose fix the author claimed (deterministic, no reviewer judgement).
+        findings = snapshot.findings
+        for record in snapshot.findings:
+            if (
+                record.origin is FindingOrigin.GATE
+                and record.state is FindingState.FIX_CLAIMED
+            ):
+                findings = _replace_finding(
+                    findings, replace(record, state=FindingState.VERIFIED_RESOLVED)
+                )
         return _issue_agent(
-            replace(snapshot, artifact_retries=0),
+            replace(snapshot, findings=findings, artifact_retries=0),
             policy,
             LaneState.REVIEWING,
             Awaiting.REVIEW,
@@ -287,27 +321,7 @@ def _on_revision_verified(
             count_round=True,
         )
     if category in FIXABLE_GATE_CATEGORIES:
-        finding_id = f"SYS-{category.value}"
-        record = snapshot.finding(finding_id)
-        if record is None:
-            record = FindingRecord(
-                finding_id=finding_id,
-                severity=Severity.P1,
-                title=f"target gate failed: {category.value}",
-                state=FindingState.OPEN,
-            )
-            findings = _sorted_findings(snapshot.findings + (record,))
-        else:
-            findings = _replace_finding(snapshot.findings, replace(record, state=FindingState.OPEN))
-        return _issue_agent(
-            replace(snapshot, findings=findings, artifact_retries=0),
-            policy,
-            LaneState.REPAIRING,
-            Awaiting.FOLD,
-            InvokeAuthor(action=AgentAction.REPAIR),
-            ReasonCode.GATE_FIXABLE,
-            dict(inputs, finding_id=finding_id),
-        )
+        return _on_fixable_gate(snapshot, category, policy, inputs)
     if category in _BLOCKING_GATE_CATEGORIES:
         return _stopped(snapshot, ReasonCode.GATE_BLOCKING, inputs)
     if category is GateCategory.UNKNOWN:
@@ -315,6 +329,83 @@ def _on_revision_verified(
     # A recognised category this lane's policy does not accept (e.g. a
     # docs-only pass on an implementation lane) is not routable: STOP.
     return _stopped(snapshot, ReasonCode.GATE_BLOCKING, inputs)
+
+
+def _on_fixable_gate(
+    snapshot: LaneSnapshot,
+    category: GateCategory,
+    policy: LanePolicy,
+    inputs: dict[str, Any],
+) -> TransitionDecision:
+    """Route a fixable gate failure through the same per-finding lifecycle as a
+    reviewer finding: repair -> guidance -> handoff, and reopen -> ping-pong
+    (protocol §8; a system finding must not bypass the escalation bounds)."""
+    finding_id = f"SYS-{category.value}"
+    inputs = dict(inputs, finding_id=finding_id)
+    record = snapshot.finding(finding_id)
+    if record is None:
+        record = FindingRecord(
+            finding_id=finding_id,
+            severity=Severity.P1,
+            title=f"target gate failed: {category.value}",
+            state=FindingState.OPEN,
+            origin=FindingOrigin.GATE,
+        )
+        findings = _sorted_findings(snapshot.findings + (record,))
+        return _issue_agent(
+            replace(snapshot, findings=findings, artifact_retries=0),
+            policy,
+            LaneState.REPAIRING,
+            Awaiting.FOLD,
+            InvokeAuthor(action=AgentAction.REPAIR),
+            ReasonCode.GATE_FIXABLE,
+            inputs,
+        )
+    if record.state is FindingState.FIX_CLAIMED:
+        # The claimed repair did not fix the gate.
+        if record.guidance_given:
+            return _stopped(snapshot, ReasonCode.HANDOFF_REQUIRED, inputs)
+        findings = _replace_finding(
+            snapshot.findings, replace(record, state=FindingState.GUIDANCE_REQUIRED)
+        )
+        return _issue_agent(
+            replace(snapshot, findings=findings, artifact_retries=0),
+            policy,
+            LaneState.REVIEWING,
+            Awaiting.GUIDANCE,
+            InvokeGuidance(),
+            ReasonCode.GUIDANCE_REQUIRED,
+            inputs,
+        )
+    if record.state is FindingState.VERIFIED_RESOLVED:
+        record = replace(
+            record, state=FindingState.REOPENED, reopen_count=record.reopen_count + 1
+        )
+        findings = _replace_finding(snapshot.findings, record)
+        working = replace(snapshot, findings=findings, artifact_retries=0)
+        if record.reopen_count >= 2:
+            return _wait_operator(working, ReasonCode.PING_PONG, inputs)
+        return _issue_agent(
+            working,
+            policy,
+            LaneState.REPAIRING,
+            Awaiting.FOLD,
+            InvokeAuthor(action=AgentAction.REPAIR),
+            ReasonCode.GATE_FIXABLE,
+            inputs,
+        )
+    # Any other pre-existing state (e.g. OPEN after a malformed-fold retry):
+    # request the repair again without resetting the lifecycle counters.
+    findings = _replace_finding(snapshot.findings, replace(record, state=FindingState.OPEN))
+    return _issue_agent(
+        replace(snapshot, findings=findings, artifact_retries=0),
+        policy,
+        LaneState.REPAIRING,
+        Awaiting.FOLD,
+        InvokeAuthor(action=AgentAction.REPAIR),
+        ReasonCode.GATE_FIXABLE,
+        inputs,
+    )
 
 
 def _on_review(snapshot: LaneSnapshot, event: ReviewAccepted, policy: LanePolicy) -> TransitionDecision:

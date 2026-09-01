@@ -6,6 +6,7 @@ from orchestrator.model import (
     AgentAction,
     Awaiting,
     Disposition,
+    FindingOrigin,
     FindingRecord,
     FindingState,
     FoldAccepted,
@@ -22,6 +23,7 @@ from orchestrator.model import (
     PriorOutcome,
     ReasonCode,
     ReviewAccepted,
+    RevisionVerified,
     Severity,
     VerifyRevision,
 )
@@ -42,6 +44,40 @@ def record(
     **overrides: object,
 ) -> FindingRecord:
     return FindingRecord(finding_id=fid, severity=severity, title=fid, state=state, **overrides)
+
+
+def fold_event(revision: int, dispositions: tuple, unknown: bool = False) -> FoldAccepted:
+    return FoldAccepted(
+        revision=revision,
+        commit=f"{revision:040x}",
+        tree_digest=f"{revision + 5000:040x}",
+        dispositions=dispositions,
+        has_unknown_contracts=unknown,
+    )
+
+
+def gate_failed(category: GateCategory = GateCategory.FIXABLE_TEST) -> RevisionVerified:
+    return RevisionVerified(
+        gate_category=category,
+        descends_from_base=True,
+        contiguous=True,
+        no_foreign_commits=True,
+        files_in_scope=True,
+        worktree_clean=True,
+        failed_checks=("tests",),
+    )
+
+
+def gate_passed() -> RevisionVerified:
+    return RevisionVerified(
+        gate_category=GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS,
+        descends_from_base=True,
+        contiguous=True,
+        no_foreign_commits=True,
+        files_in_scope=True,
+        worktree_clean=True,
+        failed_checks=(),
+    )
 
 
 def reviewing(*findings: FindingRecord, **overrides: object) -> LaneSnapshot:
@@ -112,9 +148,7 @@ def test_author_blocked_after_guidance_stops_handoff_required() -> None:
         agent_invocations=6,
         findings=(record("F1", FindingState.GUIDANCE_REQUIRED, guidance_given=True),),
     )
-    event = FoldAccepted(
-        revision=3, dispositions=(("F1", Disposition.BLOCKED_NEEDS_TECHNICAL_GUIDANCE),)
-    )
+    event = fold_event(3, (("F1", Disposition.BLOCKED_NEEDS_TECHNICAL_GUIDANCE),))
     decision = reduce(snapshot, event, POLICY)
     assert decision.snapshot.state is LaneState.STOPPED
     assert decision.reason is ReasonCode.HANDOFF_REQUIRED
@@ -128,9 +162,7 @@ def test_author_may_request_guidance_before_any_repair() -> None:
         agent_invocations=3,
         findings=(record("F1", FindingState.OPEN),),
     )
-    event = FoldAccepted(
-        revision=2, dispositions=(("F1", Disposition.BLOCKED_NEEDS_TECHNICAL_GUIDANCE),)
-    )
+    event = fold_event(2, (("F1", Disposition.BLOCKED_NEEDS_TECHNICAL_GUIDANCE),))
     decision = reduce(snapshot, event, POLICY)
     assert decision.command == InvokeGuidance()
     assert decision.snapshot.state is LaneState.REVIEWING
@@ -148,7 +180,7 @@ def test_first_rejection_goes_back_to_the_reviewer() -> None:
         agent_invocations=3,
         findings=(record("F1", FindingState.OPEN),),
     )
-    event = FoldAccepted(revision=2, dispositions=(("F1", Disposition.REJECTED_WITH_REASON),))
+    event = fold_event(2, (("F1", Disposition.REJECTED_WITH_REASON),))
     decision = reduce(snapshot, event, POLICY)
     assert decision.command == VerifyRevision()  # verify then re-review assesses the rejection
     updated = decision.snapshot.finding("F1")
@@ -189,7 +221,7 @@ def test_second_consecutive_rejection_requires_adjudication() -> None:
             record("F1", FindingState.TECHNICAL_CLARIFICATION, consecutive_rejections=1),
         ),
     )
-    event = FoldAccepted(revision=3, dispositions=(("F1", Disposition.REJECTED_WITH_REASON),))
+    event = fold_event(3, (("F1", Disposition.REJECTED_WITH_REASON),))
     decision = reduce(snapshot, event, POLICY)
     assert decision.snapshot.state is LaneState.WAIT_OPERATOR
     assert decision.reason is ReasonCode.ADJUDICATION_REQUIRED
@@ -205,7 +237,7 @@ def test_folding_resets_the_consecutive_rejection_count() -> None:
             record("F1", FindingState.TECHNICAL_CLARIFICATION, consecutive_rejections=1),
         ),
     )
-    event = FoldAccepted(revision=3, dispositions=(("F1", Disposition.FOLDED),))
+    event = fold_event(3, (("F1", Disposition.FOLDED),))
     decision = reduce(snapshot, event, POLICY)
     updated = decision.snapshot.finding("F1")
     assert updated.consecutive_rejections == 0
@@ -268,7 +300,7 @@ def test_unknown_contract_disposition_waits_for_the_operator() -> None:
         agent_invocations=3,
         findings=(record("F1", FindingState.OPEN),),
     )
-    event = FoldAccepted(revision=2, dispositions=(("F1", Disposition.UNKNOWN_CONTRACT),))
+    event = fold_event(2, (("F1", Disposition.UNKNOWN_CONTRACT),))
     decision = reduce(snapshot, event, POLICY)
     assert decision.snapshot.state is LaneState.WAIT_OPERATOR
     assert decision.reason is ReasonCode.UNKNOWN_CONTRACT
@@ -287,7 +319,7 @@ def test_scope_expansion_and_operator_action_dispositions_wait() -> None:
             findings=(record("F1", FindingState.OPEN),),
         )
         decision = reduce(
-            snapshot, FoldAccepted(revision=2, dispositions=(("F1", disposition),)), POLICY
+            snapshot, fold_event(2, (("F1", disposition),)), POLICY
         )
         assert decision.snapshot.state is LaneState.WAIT_OPERATOR
         assert decision.reason is reason
@@ -307,3 +339,75 @@ def test_no_convergence_while_any_blocker_is_unresolved() -> None:
     decision = reduce(snapshot, event, POLICY)
     assert decision.snapshot.state is not LaneState.LANDING
     assert decision.snapshot.state is not LaneState.COMPLETED
+
+
+# -- gate-origin (SYS) finding lifecycle (V0A-R1-04) -------------------------
+
+
+def sys_record(state: FindingState, **overrides: object) -> FindingRecord:
+    return FindingRecord(
+        finding_id="SYS-FIXABLE_TEST",
+        severity=Severity.P1,
+        title="target gate failed: FIXABLE_TEST",
+        state=state,
+        origin=FindingOrigin.GATE,
+        **overrides,
+    )
+
+
+def verifying(*findings: FindingRecord, **overrides: object) -> LaneSnapshot:
+    return LaneSnapshot(
+        state=LaneState.VERIFYING,
+        awaiting=Awaiting.GATE_RESULT,
+        revision=2,
+        review_round=1,
+        agent_invocations=3,
+        findings=tuple(findings),
+        **overrides,
+    )
+
+
+def test_repeated_fixable_gate_failure_requests_guidance_not_another_repair() -> None:
+    snapshot = verifying(sys_record(FindingState.FIX_CLAIMED, repair_attempts=1))
+    decision = reduce(snapshot, gate_failed(), POLICY)
+    assert decision.command == InvokeGuidance()
+    assert decision.reason is ReasonCode.GUIDANCE_REQUIRED
+    assert decision.snapshot.finding("SYS-FIXABLE_TEST").state is FindingState.GUIDANCE_REQUIRED
+
+
+def test_fixable_gate_failure_after_guided_repair_stops_handoff_required() -> None:
+    snapshot = verifying(
+        sys_record(FindingState.FIX_CLAIMED, repair_attempts=2, guidance_given=True)
+    )
+    decision = reduce(snapshot, gate_failed(), POLICY)
+    assert decision.snapshot.state is LaneState.STOPPED
+    assert decision.reason is ReasonCode.HANDOFF_REQUIRED
+    assert decision.command is None
+
+
+def test_passing_gate_is_the_resolution_evidence_for_sys_findings() -> None:
+    snapshot = verifying(sys_record(FindingState.FIX_CLAIMED, repair_attempts=1))
+    decision = reduce(snapshot, gate_passed(), POLICY)
+    assert decision.snapshot.finding("SYS-FIXABLE_TEST").state is FindingState.VERIFIED_RESOLVED
+    assert decision.snapshot.state is LaneState.REVIEWING
+
+
+def test_gate_pass_does_not_resolve_reviewer_findings() -> None:
+    snapshot = verifying(record("F1", FindingState.FIX_CLAIMED, repair_attempts=1))
+    decision = reduce(snapshot, gate_passed(), POLICY)
+    assert decision.snapshot.finding("F1").state is FindingState.FIX_CLAIMED
+
+
+def test_resolved_sys_finding_failing_again_reopens_then_ping_pongs() -> None:
+    first = verifying(sys_record(FindingState.VERIFIED_RESOLVED, repair_attempts=1))
+    reopened = reduce(first, gate_failed(), POLICY)
+    updated = reopened.snapshot.finding("SYS-FIXABLE_TEST")
+    assert updated.state is FindingState.REOPENED and updated.reopen_count == 1
+    assert reopened.snapshot.state is LaneState.REPAIRING
+
+    second = verifying(
+        sys_record(FindingState.VERIFIED_RESOLVED, repair_attempts=2, reopen_count=1)
+    )
+    decision = reduce(second, gate_failed(), POLICY)
+    assert decision.snapshot.state is LaneState.WAIT_OPERATOR
+    assert decision.reason is ReasonCode.PING_PONG

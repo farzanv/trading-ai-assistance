@@ -1,10 +1,12 @@
 """The lane coordinator: imperative shell around the pure reducer.
 
-The coordinator executes reducer-selected commands through the driver
-interfaces, validates every returned artifact, appends ledger evidence, and
-calls the reducer again. It holds no transition judgement of its own: every
-routing decision is the reducer's, and every accepted event was schema- and
-semantics-validated first (functional core / imperative shell, architecture §3).
+The coordinator is constructed from a registered Project Control Plane
+configuration plus an immutable lane identity. It derives its run directory
+through the project's containment-checked state root, executes reducer-selected
+commands through the driver interfaces, validates every returned artifact
+against the lane identity and the verified candidate revision, appends ledger
+evidence, and calls the reducer again. It holds no transition judgement of its
+own (functional core / imperative shell, architecture §3).
 
 V0-A boundary: landing is not implemented. When the reducer decides
 ``LANDING``/``LandRevision`` the run ends at convergence — nothing is landed,
@@ -15,6 +17,7 @@ V0-B scope.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +50,7 @@ from orchestrator.model import (
     InvokeReviewer,
     LandRevision,
     LaneAuthorized,
+    LaneIdentity,
     LanePolicy,
     LaneSnapshot,
     Lens,
@@ -56,8 +60,13 @@ from orchestrator.model import (
     Severity,
     VerifyRevision,
     event_to_dict,
+    policy_digest,
+    snapshot_to_dict,
 )
+from orchestrator.project import ProjectConfig, validate_identifier
 from orchestrator.reducer import reduce
+
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class CoordinatorError(Exception):
@@ -78,25 +87,38 @@ def _utc_now() -> str:
 class LaneCoordinator:
     def __init__(
         self,
-        lane_id: str,
+        project: ProjectConfig,
+        identity: LaneIdentity,
+        run_id: str,
         policy: LanePolicy,
         schemas: SchemaSet,
         author: AuthorDriver,
         reviewer: ReviewerDriver,
         gate: GateDriver,
-        run_dir: Path,
         clock: Callable[[], str] = _utc_now,
     ) -> None:
-        self._lane_id = lane_id
+        validate_identifier("lane", identity.lane_id)
+        if not _FULL_SHA_RE.fullmatch(identity.scope_base):
+            raise CoordinatorError("scope_base must be a full 40-hex SHA")
+        work_item = project.work_item(identity.work_item)  # must be declared, never inferred
+        expected_manifest = f"{project.manifest_root}/{work_item.manifest}"
+        if identity.manifest != expected_manifest:
+            raise CoordinatorError(
+                f"manifest {identity.manifest!r} does not match the declared work item "
+                f"({expected_manifest!r})"
+            )
+        self._project = project
+        self._identity = identity
+        self._run_id = run_id
         self._policy = policy
         self._schemas = schemas
         self._author = author
         self._reviewer = reviewer
         self._gate = gate
-        self._run_dir = run_dir
-        self._artifacts_dir = run_dir / "artifacts"
+        self._run_dir = project.run_dir(run_id)  # containment-checked, project-local
+        self._artifacts_dir = self._run_dir / "lanes" / identity.lane_id / "artifacts"
         self._clock = clock
-        self._ledger = Ledger(run_dir / "ledger.jsonl")
+        self._ledger = Ledger(self._run_dir / "ledger.jsonl")
 
     @property
     def ledger_path(self) -> Path:
@@ -104,6 +126,7 @@ class LaneCoordinator:
 
     def run(self, max_steps: int = 200) -> RunResult:
         """Drive the lane from AUTHORIZED until convergence, gate, or STOP."""
+        self._open_lane()
         snapshot = LaneSnapshot()
         event: Event = LaneAuthorized()
         steps = 0
@@ -114,7 +137,7 @@ class LaneCoordinator:
             decision = reduce(snapshot, event, self._policy)
             self._ledger.append(
                 KIND_DECISION,
-                self._lane_id,
+                self._identity.lane_id,
                 self._clock(),
                 {
                     "event": event_to_dict(event),
@@ -123,6 +146,7 @@ class LaneCoordinator:
                     "reason": decision.reason.value,
                     "command": decision.command.kind if decision.command is not None else None,
                     "inputs": decision.inputs,
+                    "snapshot_after": snapshot_to_dict(decision.snapshot),
                 },
             )
             snapshot = decision.snapshot
@@ -134,6 +158,26 @@ class LaneCoordinator:
 
     # -- effects ------------------------------------------------------------
 
+    def _open_lane(self) -> None:
+        """Bind the immutable lane context into the ledger before any decision."""
+        self._ledger.append(
+            KIND_EFFECT,
+            self._identity.lane_id,
+            self._clock(),
+            {
+                "effect": "LANE_OPENED",
+                "run_id": self._run_id,
+                "project_id": self._project.project_id,
+                "work_item": self._identity.work_item,
+                "manifest": self._identity.manifest,
+                "scope_base": self._identity.scope_base,
+                "lane_kind": self._policy.lane_kind,
+                "policy_digest": policy_digest(self._policy),
+                "package_digests": [list(pair) for pair in self._project.package_digests],
+                "schemas_digest": self._schemas.digest,
+            },
+        )
+
     def _end_run(self, snapshot: LaneSnapshot, command: Command | None, reason: str) -> None:
         if isinstance(command, LandRevision):
             end = "CONVERGED_V0A_NO_LANDING"  # V0-A boundary: landing is not implemented
@@ -144,7 +188,7 @@ class LaneCoordinator:
         self._write_p3_backlog(snapshot)
         self._ledger.append(
             KIND_EFFECT,
-            self._lane_id,
+            self._identity.lane_id,
             self._clock(),
             {"effect": "RUN_END", "end": end, "reason": reason, "state": snapshot.state.value},
         )
@@ -163,19 +207,27 @@ class LaneCoordinator:
 
     def _spec(self, snapshot: LaneSnapshot, role: str, action: AgentAction | None) -> InvocationSpec:
         return InvocationSpec(
-            invocation_id=f"{self._lane_id}-I{snapshot.agent_invocations:03d}",
-            lane_id=self._lane_id,
+            invocation_id=f"{self._identity.lane_id}-I{snapshot.agent_invocations:03d}",
+            project_id=self._project.project_id,
+            lane_id=self._identity.lane_id,
+            work_item=self._identity.work_item,
+            manifest=self._identity.manifest,
+            scope_base=self._identity.scope_base,
+            current_sha=snapshot.current_sha,
+            current_tree=snapshot.current_tree,
             role=role,
             action=action,
             review_round=snapshot.review_round,
             revision=snapshot.revision,
             attempt=snapshot.artifact_retries,
+            package_digests=self._project.package_digests,
+            schemas_digest=self._schemas.digest,
         )
 
     def _plan_invocation(self, spec: InvocationSpec, counted: bool, count: int) -> None:
         self._ledger.append(
             KIND_EFFECT,
-            self._lane_id,
+            self._identity.lane_id,
             self._clock(),
             {
                 "effect": "INVOCATION_PLANNED",
@@ -195,7 +247,7 @@ class LaneCoordinator:
         path.write_text(canonical + "\n", encoding="utf-8")
         self._ledger.append(
             KIND_EFFECT,
-            self._lane_id,
+            self._identity.lane_id,
             self._clock(),
             {
                 "effect": "ARTIFACT_ACCEPTED",
@@ -207,9 +259,10 @@ class LaneCoordinator:
         )
 
     def _reject_artifact(self, kind: str, spec: InvocationSpec, error: ArtifactError) -> None:
+        # ArtifactError.errors is sanitized (paths/keywords, no raw values).
         self._ledger.append(
             KIND_EFFECT,
-            self._lane_id,
+            self._identity.lane_id,
             self._clock(),
             {
                 "effect": "ARTIFACT_REJECTED",
@@ -237,12 +290,19 @@ class LaneCoordinator:
         self._plan_invocation(spec, counted=True, count=snapshot.agent_invocations)
         raw = self._author.author(spec)
         try:
-            summary = validate_author_result(self._schemas, raw, expected_revision=1)
+            summary = validate_author_result(
+                self._schemas, raw, identity=self._identity, expected_revision=1
+            )
         except ArtifactError as exc:
             self._reject_artifact("author-result", spec, exc)
             return ArtifactRejected(artifact=Awaiting.AUTHOR_RESULT)
         self._accept_artifact("author-result", spec, raw)
-        return AuthorResultAccepted(revision=summary.revision)
+        return AuthorResultAccepted(
+            revision=summary.revision,
+            commit=summary.commit,
+            tree_digest=summary.tree_digest,
+            has_unknown_contracts=summary.has_unknown_contracts,
+        )
 
     def _do_repair(self, snapshot: LaneSnapshot) -> Event:
         spec = self._spec(snapshot, "author", AgentAction.REPAIR)
@@ -252,32 +312,47 @@ class LaneCoordinator:
             summary = validate_fold(
                 self._schemas,
                 raw,
+                identity=self._identity,
                 outstanding_ids=snapshot.fold_outstanding_ids(),
                 expected_revision=snapshot.revision + 1,
+                prev_sha=snapshot.current_sha,
             )
         except ArtifactError as exc:
             self._reject_artifact("fold", spec, exc)
             return ArtifactRejected(artifact=Awaiting.FOLD)
         self._accept_artifact("fold", spec, raw)
-        return FoldAccepted(revision=summary.revision, dispositions=summary.dispositions)
+        return FoldAccepted(
+            revision=summary.revision,
+            commit=summary.commit,
+            tree_digest=summary.tree_digest,
+            dispositions=summary.dispositions,
+            has_unknown_contracts=summary.has_unknown_contracts,
+        )
 
     def _do_verify(self, snapshot: LaneSnapshot) -> Event:
         spec = self._spec(snapshot, "gate", None)
         self._plan_invocation(spec, counted=False, count=snapshot.agent_invocations)
         git_facts, raw = self._gate.verify(spec)
         try:
-            category = validate_gate_result(self._schemas, raw)
+            summary = validate_gate_result(
+                self._schemas,
+                raw,
+                identity=self._identity,
+                current_sha=snapshot.current_sha,
+                current_tree=snapshot.current_tree,
+            )
         except ArtifactError as exc:
             self._reject_artifact("target-gate-result", spec, exc)
             return ArtifactRejected(artifact=Awaiting.GATE_RESULT)
         self._accept_artifact("target-gate-result", spec, raw)
         return RevisionVerified(
-            gate_category=category,
+            gate_category=summary.category,
             descends_from_base=git_facts.descends_from_base,
             contiguous=git_facts.contiguous,
             no_foreign_commits=git_facts.no_foreign_commits,
             files_in_scope=git_facts.files_in_scope,
             worktree_clean=git_facts.worktree_clean,
+            failed_checks=summary.failed_checks,
         )
 
     def _do_review(self, snapshot: LaneSnapshot) -> Event:
@@ -288,8 +363,11 @@ class LaneCoordinator:
             summary = validate_review(
                 self._schemas,
                 raw,
+                identity=self._identity,
                 expected_lens=Lens.GATING,
                 historical=snapshot.historical_blocking_states(),
+                current_sha=snapshot.current_sha,
+                current_tree=snapshot.current_tree,
             )
         except ArtifactError as exc:
             self._reject_artifact("review", spec, exc)
@@ -313,7 +391,14 @@ class LaneCoordinator:
             if f.blocking and f.state is FindingState.GUIDANCE_REQUIRED and not f.guidance_given
         )
         try:
-            summary = validate_guidance(self._schemas, raw, expected_finding_ids=expected)
+            summary = validate_guidance(
+                self._schemas,
+                raw,
+                identity=self._identity,
+                expected_finding_ids=expected,
+                current_sha=snapshot.current_sha,
+                current_tree=snapshot.current_tree,
+            )
         except ArtifactError as exc:
             self._reject_artifact("guidance", spec, exc)
             return ArtifactRejected(artifact=Awaiting.GUIDANCE)
