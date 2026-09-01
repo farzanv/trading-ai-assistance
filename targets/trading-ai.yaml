@@ -1,4 +1,7 @@
-# Target repository: trading-ai (first and only target for M0–M3).
+# LEGACY PROPOSED TARGET CONFIG. V0-A migrates these settings into the reviewed
+# projects/trading-ai-engine/ Project Control Plane; this file must not remain a second
+# authority after migration.
+# Target repository: trading-ai (first project for T0/V0/V1).
 # Paths are operator-machine local. No secret belongs in this file.
 
 name: trading-ai
@@ -15,10 +18,11 @@ deployment_surface:                # a diff touching these forces a human gate (
 
 gate:
   cwd: dil-engine
-  command: ["python", "scripts/verify_release.py", "--manifest", "{manifest}", "--sha", "{sha}", "--phase", "static"]
-  # exit 0 = PASS; non-zero = BLOCKED or INCONCLUSIVE (docs-only slices are INCONCLUSIVE by design;
-  # the orchestrator accepts INCONCLUSIVE only when the report's "Scope check" line is PASS and the
-  # manifest declares focused_tests: [] — never upgraded to PASS)
+  command: ["python", "scripts/verify_release.py", "--manifest", "{manifest}", "--sha", "{sha}", "--phase", "static", "--json"]
+  contract_status: BLOCKED_UNTIL_T0
+  result_schema: target-gate-result/v1
+  # The current target script does not yet support --json. No Assist lane may use this
+  # proposed config until T0 implements/reviews the stable category + checks + range result.
 
 conventions:
   round_record_section: "## 11. Review round record"
@@ -31,51 +35,122 @@ agent_rules:                       # files the agents are bound by inside this t
   - dil-engine/docs/process/COLLABORATION_CONTRACT.md
   - dil-engine/docs/process/DECISIONS.md
 
-# Model/effort per role per lane (design §5.5). Claude flags documented (--model, --effort);
-# Codex flags UNVERIFIED until the M0 smoke run. A lane manifest may override for that lane.
+shared_safety_package: shared/safety/v1
+execution:
+  mode: single_phase
+  local_land_exact_clean_tree: true
+  auto_push: false                 # V0; enable only after the rev-3 graduation gate
+  stop_after_phase_land: true
+  bookkeeping: separate_operator_started_run
+  manifest_preparation: separate_authorized_claude_slice
+  integration_tip_check: before_every_agent_verify_and_land
+  max_agent_invocations: 40
+
+# Model/effort per role per lane (design §5.5). CLI flag presence is locally verified;
+# exact-child auth/schema/sandbox/limit behavior remains a V0 smoke prerequisite.
 agents:
   claude:
     cli: claude
     model_flag: "--model"
     effort_flag: "--effort"           # low | medium | high | xhigh | max
-    budget_flag: "--max-budget-usd"
     turns_flag: "--max-turns"
   codex:
     cli: codex
     model_flag: "-m"
-    effort_override: "-c model_reasoning_effort={effort}"   # UNVERIFIED (M0)
+    effort_override: "-c model_reasoning_effort={effort}"
+    sandbox_args: ["-s", "read-only"]
+    output_schema_flag: "--output-schema"
 
 lanes:
   design:
-    author:   { agent: claude, model: claude-fable-5, effort: high, max_budget_usd: 25, max_turns: 200 }
+    author:   { agent: claude, model: claude-fable-5, effort: high, max_turns: 200 }
     reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
     author_tools: [edit, git, pytest, pyflakes]      # no MCP DB, no provider MCP, no web
     reviewer_sandbox: read-only
-    max_rounds: 5                                   # design §10 decision 2 — PROPOSED
+    max_rounds: 10
+    max_agent_invocations: 40
   implementation:
-    author:   { agent: claude, model: claude-fable-5, effort: high, max_budget_usd: 40, max_turns: 400 }
+    author:   { agent: claude, model: claude-fable-5, effort: high, max_turns: 400 }
     reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
     author_tools: [edit, git, pytest, pyflakes, dev-db, provider-env]   # dev-db = trading_ai_v4 RW (ruling 2026-08-29)
     reviewer_sandbox: read-only
     reviewer_tools: [dev-db-readonly]
-    max_rounds: 5
+    max_rounds: 10
+    max_agent_invocations: 40
   bookkeeping:
-    author:   { agent: claude, model: claude-sonnet-5, effort: medium, max_budget_usd: 5, max_turns: 40 }
+    author:   { agent: claude, model: claude-sonnet-5, effort: medium, max_turns: 40 }
     reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: medium }
     author_tools: [edit, git]
     reviewer_sandbox: read-only
     max_rounds: 2
+    max_agent_invocations: 10
 
-# Limit / outage handling (design §5.6): PAUSED_LIMIT, never a STOP until the pause budget trips.
+handoff:
+  trigger: guided_repair_still_present
+  mode: new_dependent_lane
+  owner: codex
+  reviewer: claude
+  manifest_preparation: separate_claude_authored_codex_reviewed_slice
+  scope_base: accepted_handoff_manifest_preparation_commit
+  records_stopped_lane_tip: true
+  one_way: true
+  codex_self_review_lens: advisory
+  advisory_can_gate: false
+
+privilege_boundary:
+  verify_process:
+    push_capability: false
+    integration_checkout_write: false
+    network: manifest_grant_only
+    database: manifest_grant_only
+  land_process:
+    run_target_code: false
+    hooks_path: orchestrator_owned_empty_directory
+    inspect_hook_changes: true
+    remote_push: false
+  auto_push_graduation:
+    require_child_push_denial_test: true
+    require_land_process_no_target_code_test: true
+    watched_surprise_free_lanes: 3
+
+# Limit / outage handling (design §5.6): PAUSED_LIMIT preserves the same step.
 limits:
-  pause_budget_hours: 12            # PROPOSED
-  max_consecutive_account_failures: 3
-  retry_backoff_cap_minutes: 30
-  limit_signals:                    # pinned from the M0 smoke run; anything unrecognised = UNKNOWN_FAILURE -> STOP
+  billing_mode: subscription_only
+  paid_api_fallback: false
+  hourly:
+    first_retry_from_agent_run_start_minutes: 330
+    repeated_retry_minutes: 30
+    reported_reset_grace_minutes: 1
+  weekly:
+    retry_minutes: 480
+    reported_reset_grace_minutes: 1
+  unknown_limit:
+    retry_minutes: 30
+  outage:
+    retry_minutes: 60
+  account:
+    confirmation_retries: 1
+  limit_signals:                    # pinned from the V0 smoke run; anything unrecognised = UNKNOWN_FAILURE -> STOP
     claude:
       stream_event: "system/api_retry"          # error ∈ rate_limit | overloaded | billing_error | authentication_failed | server_error
-      usage_limit_text: []                      # UNVERIFIED — fill with the exact "limit reached … resets at" surface at M0
+      usage_limit_text: []                      # UNVERIFIED — fill from the exact V0 child surface
     codex:
-      exit_codes: []                            # UNVERIFIED (M0)
-      stderr_patterns: []                       # UNVERIFIED (M0)
-  notify: [console, email]          # console always; email via the existing alert channel
+      exit_codes: []                            # UNVERIFIED (V0 exact-child smoke)
+      stderr_patterns: []                       # UNVERIFIED (V0 exact-child smoke)
+  console_events:
+    - pause_detected
+    - scheduled_check_still_blocked
+    - immediate_retry_requested
+    - limit_or_outage_cleared
+    - work_resumed
+    - resume_failed
+    - wait_operator
+    - stopped
+    - completed
+
+persistence:
+  structured_retention: indefinite_local
+  persist_full_raw_transcripts: false
+  diagnostic_max_bytes_per_invocation: 1048576
+  forbidden_sources: [environment_dump, auth_file, cli_auth_cache, token, credential]
+  automatic_purge: false

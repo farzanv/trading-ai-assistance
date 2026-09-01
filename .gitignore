@@ -8,4 +8,6 @@ __pycache__/
 *.env
 runs/*
 !runs/.gitkeep
+projects/*/state/*
+!projects/*/state/.gitkeep
 worktrees/

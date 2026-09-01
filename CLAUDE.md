@@ -37,34 +37,63 @@ repository; until then the operator relays as today.
 - **Deterministic state machine.** Transitions are pure functions of (state, RVA verdict,
   schema-validated `review.json` / `fold.json`, git facts, counters). No LLM call decides a
   transition. No prose is interpreted — structured artifacts only.
-- **Convergence is a predicate**, never a judgement: reviewer verdict `CLEAN` (no P0–P2)
-  on the current revision AND the target's deterministic gate PASS (code slice) or
-  INCONCLUSIVE-with-scope-PASS (docs-only slice — never upgraded to PASS here).
-- **Fail closed.** `max_rounds` exhaustion, ping-pong (a finding id reopened after two
-  folds), two consecutive `REJECTED_WITH_REASON` on one finding, malformed artifacts after
+- **Convergence is a predicate**, never a judgement: `lens: gating` reviewer verdict
+  `CLEAN` (no P0–P2) on the current revision AND an accepted machine-readable target-gate
+  category. Human RVA prose and `lens: advisory` can never supply convergence.
+- **Fail closed.** `max_rounds=10`, `max_agent_invocations=40`, ping-pong (a previously
+  `VERIFIED_RESOLVED` finding later `REOPENED` twice), two consecutive
+  `REJECTED_WITH_REASON` on one finding, malformed artifacts after
   one retry, `UNKNOWN_CONTRACT`, `earlier_phase_gap`, `requires_ruling`, dirty/unexpected
-  base, foreign commits in range, secret-scan hit, budget trip → STOP with a Human Gate
+  base, foreign commits in range, forbidden/oversized persisted artifact, or round/finding
+  bound trip → STOP with a Human Gate
   Brief. Nothing lands on a STOP.
 - **Verify, never trust.** After every agent return: commit exists and descends from the
   lane base; range contiguous with no foreign commits; changed files ⊆ `allowed_files`
-  via the target's RVA (never a re-implementation); working tree clean; secret scan clean.
+  via the target's RVA (never a re-implementation); working tree clean; structured
+  artifacts and optional diagnostics satisfy the persistence-safety contract.
 - **Human gates are detected, not remembered** — from the target manifest and diff (design
   §3.3). The orchestrator never performs an operator action (migrations, deployment, Test
   runs, external authorization); it prepares the runbook and waits.
-- **Landing = fast-forward onto the target's integration branch, then push.** No merge
-  commits, no squash; the target's range discipline depends on linear history. Land only
-  converged slices whose tree digest equals the digest reviewed CLEAN.
-- **Ledger is append-only** (`runs/<target>/<lane>.jsonl`), digest-chained, and records
-  every invocation, artifact digest, transition with predicate inputs, and counter. Resume
+- **V0 landing is local-only.** No merge commits or squash. Locally fast-forward only a
+  converged exact tree, then stop before push and before bookkeeping. Automatic V1 push
+  requires the documented privilege-isolation proof and three surprise-free watched lanes.
+- **Ledger is append-only**
+  (`projects/<project>/state/runs/<run>/ledger.jsonl`), digest-chained, and records
+  every spawned agent process, artifact digest, transition with predicate inputs, and counter. Resume
   names the ledger line it resumes from — never "latest".
 - **Reviewer runs in a read-only sandbox; author runs under the lane's tool allowlist.**
   Non-authoring review and design-only boundaries are structural, not instructions.
-- **Secrets.** The orchestrator process holds only what git push needs. Agent env files
+- **Privilege split.** Agent and verify children have no push credential/helper,
+  integration-checkout write, or ungranted network/DB access. A separate V0 land worker
+  runs fixed local Git plumbing only, overrides `core.hooksPath` to an owned empty
+  directory, and never executes target/model code. Agent env files
   are mounted into agent sessions per lane grant and never printed, logged, or persisted;
   neither agent's CLI config is ever read into a log (both contain connection strings).
-- **One lane at a time.** No worktree exists for a lane that is not running.
-- **Bookkeeping is rendered from the ledger**, not retyped: SHAs, ranges, round counts,
-  `verified_slices`. Prose stays agent-authored.
+  Every project explicitly binds the shared safety role/skill package. V1 has no dedicated
+  scanner: only schema-defined structured artifacts and optional 1-MiB diagnostic text
+  persist; full raw transcripts, environment dumps, auth files, tokens, and credentials do not.
+- **Project Control Plane.** Every managed project has its own `INDEX.md`, configuration,
+  work index, agent/skill packages, policies, plans, and gitignored state under
+  `projects/<project>/`. No project runtime file is stored globally or in another project.
+- **One executing lane globally in V1.** Many projects may be registered; a second
+  execution worker is refused while read-only monitoring commands may run concurrently.
+  No worktree exists for a lane that is not running.
+- **Durable subscription pauses.** Hourly/weekly limits and outages pause the same step,
+  never consume a review round, follow the governed retry schedule, print/persist every
+  material status event, and accept `assist retry-now`. Every newly spawned CLI process,
+  including a retry, counts against 40. No API-key billing fallback or obsolete 12-hour
+  pause cutoff is allowed.
+- **One phase per V1 run.** A selected manifest must already exist. Assist/Codex never
+  synthesize it; Claude may prepare the next manifest only as a separately authorized and
+  reviewed slice after the predecessor lands. Multi-phase plans are future scope.
+- **Bookkeeping is a separate operator-started run.** Its manifest is prepared against the
+  landed phase tip. Facts are rendered from the phase ledger; prose stays agent-authored.
+  A phase run must not claim bookkeeping completion.
+- **GUIDANCE contains no code.** If the guided repair still fails, stop
+  `HANDOFF_REQUIRED`. Claude first prepares the handoff manifest in a separate reviewed
+  slice rooted at the stopped tip; the dependent lane uses that preparation commit as its
+  literal base, owner Codex, reviewer Claude, and a one-way swap. Codex self-review
+  is `lens: advisory` and structurally cannot gate landing.
 
 ## Environment
 
@@ -77,10 +106,14 @@ python -m venv venv; .\venv\Scripts\Activate.ps1; pip install -r requirements.tx
 External CLIs the orchestrator drives (must be on PATH; never vendored):
 - `claude` (Claude Code) — headless via `claude -p … --output-format json`, `--resume`.
 - `codex` (Codex CLI, `@openai/codex`) — headless via `codex exec`, read-only sandbox for
-  review. **Not yet installed on the operator's machine (only the desktop app)** — M0 prereq.
+  review. Version 0.151.0 is installed; subscription auth must still be proved inside the
+  exact driver environment/`CODEX_HOME`, not inferred from the interactive shell.
 
-Target repositories are configured in `targets/<name>.yaml` (path, integration branch,
-manifest dir, gate command). No target path is hard-coded in source.
+Target repositories are registered through `projects/registry.yaml` and configured in
+`projects/<project>/project.yaml` (path, integration branch, manifest root, gate command,
+agent/skill/policy references). Runtime state stays under that project. No target path is
+hard-coded in source. The present `targets/trading-ai.yaml` is a legacy proposed scaffold
+pending the V0-A Project Control Plane migration and must not become a second authority.
 
 ## Tests
 
@@ -114,4 +147,10 @@ with `%s` formatting; comments only for a non-obvious WHY; pyflakes clean. JSON 
 - Don't widen a target manifest's `allowed_files` or rewrite its `scope_base` to make a
   landing pass; a foreign file in range is a STOP for the owner.
 - Don't create a second lane, worktree, or nested authoring agent.
+- Don't swap author/reviewer roles inside a lane or let an advisory review produce CLEAN.
+- Don't execute reviewer-supplied code/commands or mutation tests in V0.
+- Don't place a project's state, command, console/status event, or artifact outside that
+  project's `state/` root; don't treat a generated projection as ledger authority.
+- Don't infer a work item by scanning a manifest directory and don't create a missing
+  manifest. Start from an explicitly selected work item or authorized run plan.
 - Don't write anything into a target repository except by landing a converged slice.

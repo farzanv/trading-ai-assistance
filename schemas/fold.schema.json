@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v1/fold.schema.json",
-  "title": "fold.json — structured author output after folding a review round (design §5.2)",
+  "title": "DRAFT fold.json — structured author output after folding a review round (design §5.2)",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "commit", "revision", "folded_review_range", "dispositions", "author"],

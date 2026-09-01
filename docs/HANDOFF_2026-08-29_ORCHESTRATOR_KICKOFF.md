@@ -1,5 +1,9 @@
 # Handoff — 2026-08-29: the orchestrator project, from zero
 
+**Rev-3 refresh 2026-08-31:** the independent Claude review and operator confirmations
+supersede earlier landing/bookkeeping/CLI assumptions in this kickoff. This file now
+reflects local-only V0 landing, separate bookkeeping, and cross-lane handoff.
+
 **Audience:** Codex (first), and any future Claude thread. Read this *before* the design
 document — it explains what we are trying to do and why, in plain language, with one worked
 example. The design (`design/ORCHESTRATED_EXECUTION_DESIGN.md`) is the contract; this is the
@@ -12,7 +16,8 @@ authors a revision → the operator asks Codex to review it → the operator pas
 findings to Claude → Claude folds them into the next revision and commits → the operator
 asks Codex to review again → … until Codex reports no P0–P2 findings → the operator
 approves and rules the open decisions → Claude records the approval. Phase 7 took five
-review rounds plus three rounds repairing the approval record; Phase 8 is at rev 9 today.
+review rounds plus three rounds repairing the approval record; Phase 8 ultimately required
+ten revisions and is now Codex/operator approved, with bookkeeping directed separately.
 The *judgement* in that loop (authoring, red-teaming, rulings) is well spent. The *relay* —
 the operator hand-carrying outputs between two agents and retyping SHAs into three
 bookkeeping places — is not, and it is where a lot of the repair rounds come from.
@@ -32,11 +37,11 @@ named human gates the system identifies on its own.
    and it holds none of `trading-ai`'s credentials.
 3. **Strictly serial.** One author, one reviewer, one orchestrator, one lane at a time. No
    parallel agents in this version (the parallel-execution idea was reviewed and set aside).
-4. **Design phases run unattended ("Mode A").** After a phase converges, the next phase
-   starts immediately; the operator's rulings on open decisions accumulate in a *decision
-   inbox* and can be made any time. Tripwire: if the reviewer marks an open decision as
-   load-bearing for the next phase's seam (`blocks_downstream: true`), the loop pauses for
-   that ruling.
+4. **V0 runs one design phase at a time (Mode B).** After a phase converges, Assist locally
+   lands the exact reviewed tree, prints completion, and stops before push and bookkeeping.
+   Bookkeeping has its own prepared manifest and operator-started run.
+   Claude prepares the next phase manifest separately after explicit authorization and
+   against the new exact tip. Multi-phase Mode A and the decision inbox are future scope.
 5. **Implementation phases always have a human gate**: the agents implement, review, and
    exercise the code themselves; the operator deploys to Test and validates, per phase.
 6. **Dev (`trading_ai_v4`) becomes the agents' shared read/write validation database.**
@@ -49,27 +54,54 @@ named human gates the system identifies on its own.
    the review and the operator brief). A human gate on every new library would break the
    loop for minor issues. Library vetting and all security scanning are **phase 2**, done
    outside the loop — approach undecided, options in `design/SECURITY_SCANNING_OPTIONS.md`.
-   Two guardrails stay inside the loop: a secret scan (hard STOP) and a short security
-   checklist the reviewer answers.
+   V1 has no dedicated scanner. Shared agent/skill safety rules plus structural
+   schema/path/type/size persistence controls remain, as does the reviewer checklist.
 8. **Unknown provider/API contracts stop the loop.** If neither agent can answer a
    provider question from pinned docs or audited captures, guessing is prohibited; the
    orchestrator packages the residual question for the operator.
+9. **Project Control Plane in this repository.** `projects/` is the high-level project
+   manager: registry, per-project orientation/config/work index, project-specific agents,
+   skills, policies and plans. Target technical authority and manifests stay in the target.
+10. **Project-local state and one V1 worker.** Every ledger, projection, command,
+    console/status event and recovery artifact lives below its project's gitignored `state/`.
+    Multiple projects may be configured, but V1 executes one lane globally; monitors may
+    run concurrently.
+11. **Subscription-limit recovery is automatic.** ChatGPT Plus and Claude Max auth only;
+    hourly limits use reported reset or 5h30 then 30-minute checks, weekly limits are
+    checked every eight hours, outages hourly, and `assist retry-now` forces an immediate
+    attempt. Every detection/check/clear/resume/outcome is printed and persisted for
+    `assist status`/`assist watch`. There is no
+    12-hour recoverable-pause cutoff or automatic API billing fallback.
+12. **Machine-readable RVA first.** `trading-ai` must publish a versioned JSON gate result
+    before any live Assist lane; the present binary exit code cannot route docs-only work.
+13. **Privilege split.** Target tests/RVA run in a credential-free verify process. A
+    separate hooks-disabled land process runs fixed Git plumbing only. Automatic push is
+    V1 behavior after proof plus three surprise-free watched lanes.
+14. **Bounded model consumption.** Ten review rounds and 40 spawned agent processes;
+    retries after pauses count as invocations.
+15. **Stuck repair handoff.** GUIDANCE contains no code. Persistent failure stops and may
+    open a separately authorized, one-way Codex-author/Claude-reviewer dependent lane.
 
 ## 3. How one lane works — a walkthrough (design Phase 9 under the loop)
 
-1. **Operator authorizes** "Phase 9 design authoring" (exactly as today: a sentence, quoted
-   into the manifest header). The orchestrator opens a lane bound to
+1. **Operator authorizes** `assist start --project trading-ai-engine --work-item
+   ca_platform_design_phase9` (the authorization text is still recorded exactly). This
+   command is illustrative until the Phase 9 manifest and T0 RVA JSON contract exist. The
+   Project Control Plane resolves the repository, manifest root, project-specific
+   agent/skill packages and policies, then opens a lane bound to
    `dil-engine/manifests/ca_platform_design_phase9.yaml` at the clean `development` tip.
 2. **Author, rev 1.** The orchestrator creates a git worktree at that tip and runs Claude
    headlessly (`claude -p`) with a *lane brief* generated from the manifest, the phase's
    matrix row, and the approved predecessors' seam sections — plus a tool allowlist (file
-   edit, git, pytest, pyflakes; no DB, no provider, no web). Claude authors the doc and
-   manifest, commits `CA Phase 9 design rev 1: …`, and returns the SHA.
-3. **Verify.** The orchestrator checks: the commit exists and descends from the base; the
+   edit, git, pytest, pyflakes; no DB, no provider, no web). The manifest must already
+   exist; Claude authors the doc and updates that authorized manifest, commits
+   `CA Phase 9 design rev 1: …`, and returns the SHA.
+3. **Verify.** The credential-free verify process checks: the commit exists and descends from the base; the
    range has no foreign commits; changed files are within `allowed_files` — by running
    `trading-ai`'s own `scripts/verify_release.py` (the RVA), never its own copy of the
-   rule; secret scan clean. A docs-only slice makes the RVA say INCONCLUSIVE-with-scope-
-   PASS; that is the expected outcome for design and is never upgraded to PASS.
+   rule; structured artifacts satisfy the persistence-safety contract. Before this
+   walkthrough is executable, the RVA must return a machine-readable
+   `DOCS_INCONCLUSIVE_SCOPE_PASS` category; prose is never parsed.
 4. **Review, round 1.** The orchestrator runs Codex headlessly (`codex exec`) in a fresh
    worktree at that exact SHA, **read-only sandbox**, with the lane's review brief. Codex
    writes its prose review as today *and* a `review.json` (`schemas/review.schema.json`):
@@ -85,18 +117,22 @@ named human gates the system identifies on its own.
    it goes back to Codex verbatim next round; two consecutive rejections of one id is a
    STOP for the operator to adjudicate (exactly the operator's role today).
 6. **Repeat** 3 → 4 → 5 until Codex's verdict is `CLEAN` (no P0–P2) — the **convergence
-   predicate** — or a counter trips (`max_rounds`, proposed 5; token or wall-clock budget;
-   a finding reopened after two folds = ping-pong). Any trip is a STOP, never a forced
+   predicate** — or a counter trips (`max_rounds=10`, `max_agent_invocations=40`;
+   a previously resolved finding reopened twice = ping-pong). Any trip is a STOP, never a forced
    acceptance.
-7. **Land.** The converged revision is fast-forwarded onto `development` and pushed (no
-   merge commits — the range discipline depends on linear history), only if its tree
-   digest equals the one Codex reviewed CLEAN. Bookkeeping SHAs/ranges/`verified_slices`
-   are rendered from the orchestrator's ledger rather than retyped.
-8. **Next phase.** Under Mode A, Phase 10 opens immediately on the converged text with
-   Phase 9's open decisions consumed at PROPOSED, and those decisions appear in the
-   operator's decision inbox. If Codex flagged one as `blocks_downstream`, the loop pauses
-   here instead and sends the operator a **Human Gate Brief**.
-9. **Human Gate Brief** — every STOP or gate produces one page: why you are being asked
+7. **Land.** V0 locally fast-forwards the converged revision onto `development` and stops
+   before push, only if its tree digest equals the one reviewed CLEAN. The operator pushes
+   during the watched V0 period.
+8. **Bookkeeping and next phase.** The phase run is complete, but bookkeeping is not.
+   The operator authorizes Claude to prepare a bookkeeping manifest against the landed tip
+   and separately starts that run. When Phase 10 is authorized, Claude prepares its manifest as
+   a separate reviewed slice whose literal `scope_base` equals the landed Phase 9 tip.
+   Assist and Codex never synthesize it. Then the operator starts a new Phase 10 run.
+9. **Limits and outages.** A five-hour/weekly subscription limit or service outage enters
+   `PAUSED_LIMIT`, persists the same step, prints/persists status immediately, and checks on the ruled
+   schedule. `assist retry-now` wakes the current lane after a plan upgrade or credit
+   purchase. No lane ID is needed because V1 has one active lane.
+10. **Human Gate Brief** — every STOP or gate produces one page: why you are being asked
    (the rule that fired, in one sentence), what the lane did (the logic, not the diff), a
    glossary of every abbreviation used, the exact ask with options and a recommendation,
    evidence pointers (range, RVA header, verdict, ledger line), and what answering does
@@ -129,41 +165,47 @@ ledger completeness and privilege minimalism (see `AGENTS.md` here).
 
 ## 5. What is decided, what is open
 
-**Decided (see §2):** deterministic orchestrator; own repo; serial; Mode A + tripwire;
+**Decided (see §2):** deterministic orchestrator; own repo; serial; one-phase Mode B V0;
 implementation human gates; Dev RW for agents; no dependency gate; security = phase 2;
-unknown contracts STOP.
+unknown contracts STOP; Project Control Plane; project-local state; project-specific
+agents/skills; one V1 execution worker; subscription-only auth; durable limit/outage
+recovery, console/status monitoring, and immediate retry; no token/total-lane budget;
+P2 blocks; exact-tree local V0 landing; separate bookkeeping; no dedicated V1 scanner; structured artifacts
+retained locally without raw transcripts; manual Windows resume.
 
-**Open (design §10):** `max_rounds` and budgets; whether P2 findings on *design* docs are
-fold-now (current practice) or backlog (the contract's letter); land-on-convergence vs
-land-on-approval; who owns build steps M0–M3; the template-database relocation on the
-`trading-ai` side (Dev can no longer be the clone template); the phase-2 scanning approach.
+**Open (design §10):** who owns build steps T0/V0-A/V0-B/V0-C/V1 and the template-database relocation on
+the `trading-ai` side. Scanner selection remains a later security-phase decision, not a
+V1 prerequisite.
 
-**Not yet done (prerequisites, design §8):** Codex CLI (`codex exec`) is not installed —
-only the desktop app; `claude -p` smoke run with `--resume` and a restricted allowlist;
-the `review.json`/`fold.json` obligations added to `trading-ai`'s `AGENTS.md`/`CLAUDE.md`;
+**Not yet done (prerequisites, design §8):** `trading-ai` RVA JSON result; exact-child
+Codex/Claude subscription and schema/sandbox/limit smoke runs; v2 artifact schemas;
+the structured obligations added to `trading-ai`'s `AGENTS.md`/`CLAUDE.md`;
 the operator's §1.2 amendment to the collaboration contract; the `trading_ai_agent` login.
 
 ## 6. Build plan (each step its own manifest + review)
 
 | Step | Deliverable | Proves |
 |---|---|---|
-| M0 | this repo (done), CLI install, two headless smoke runs on a throwaway branch, schemas reviewed, `trading-ai` obligations slice | both agents are driveable and sandboxed from outside the target |
-| M1 | single-phase design loop, Mode B (operator approves at the end), run on **Phase 9** while the operator watches | the loop converges on a real phase without a relay — **the go/no-go** |
-| M2 | multi-phase chaining, decision inbox, Mode A + tripwire; Phases 10–12 | unattended design completion |
-| M3 | implementation-lane mode with gate detection, briefs, Dev execution discipline | human gates found by the system |
+| T0 | `trading-ai` versioned RVA JSON result | docs-only and blocking outcomes are deterministic |
+| V0-A | reduced reducer, four v2 schemas, one project, ledger, fake loop | the walking skeleton is deterministic |
+| V0-B | real drivers, verify/land split, local landing, recovery/limits/console | untrusted execution cannot use landing privilege |
+| V0-C | watched real phase + separate bookkeeping run | relay reduction — **the go/no-go** |
+| V1 | automatic push after graduation; implementation human gates | safe unattended landing |
 
 ## 7. Where things are
 
 | Artifact | Location |
 |---|---|
-| Design authority (rev 1, PROPOSED) | `docs/design/ORCHESTRATED_EXECUTION_DESIGN.md` |
+| Design authority (rev 3, PROPOSED) | `docs/design/ORCHESTRATED_EXECUTION_DESIGN.md` |
 | Security scanning options (phase 2, open) | `docs/design/SECURITY_SCANNING_OPTIONS.md` |
 | Agent contract schemas (v1, DRAFT) | `schemas/review.schema.json`, `schemas/fold.schema.json` |
-| First target config (PROPOSED) | `targets/trading-ai.yaml` |
+| Project Control Plane design and final layout | `docs/design/PROJECT_CONTROL_PLANE.md` |
+| Legacy first-target proposal, pending V0-A migration | `targets/trading-ai.yaml` |
+| Planned Engine project config | `projects/trading-ai-engine/project.yaml` |
 | Binding invariants / Codex notes | `CLAUDE.md`, `AGENTS.md` |
 | Work item for the scaffold | `manifests/repo_scaffold.yaml` |
 | `trading-ai` side (parked) | branch `process/orchestrator-pointer-dev-ruling`: CLAUDE.md Dev-RW amendment, design pointer, manifest `orchestrator_pointer_dev_rw_ruling.yaml` |
-| `trading-ai` state at handoff | `development` at `d2a3881` (CA Phase 8 rev 9, mid-slice — do not interleave) |
+| `trading-ai` state checked 2026-08-31 | `development` at `fb5f874`; Phase 8 closed/bookkept; Phase 9 handoff exists but `ca_platform_design_phase9.yaml` does not |
 
 ## 8. Glossary
 
@@ -171,27 +213,31 @@ the operator's §1.2 amendment to the collaboration contract; the `trading_ai_ag
 - **Manifest** — the per-work-item YAML in `trading-ai/dil-engine/manifests/` (`scope_base`,
   `allowed_files`, `dependencies`, `operator_actions`, `verified_slices`, …).
 - **RVA** — Release Verification Agent, `trading-ai`'s deterministic gate
-  (`scripts/verify_release.py`): scope check, dependency ancestry, tests, lint; PASS /
-  BLOCKED / INCONCLUSIVE, fail-closed.
+  (`scripts/verify_release.py`): scope check, dependency ancestry, tests, lint. T0 adds the
+  required versioned JSON category/check/range result; the present exit code alone is not
+  routable for docs-only work.
 - **Slice / range** — the commits of one work item, `scope_base..sha`, which must be
   contiguous with no foreign commits so the RVA can judge exactly that diff.
 - **Fold** — incorporating a review round's findings into the next revision.
-- **Convergence** — reviewer verdict CLEAN (no P0–P2) *and* gate PASS (or docs-only
-  INCONCLUSIVE with scope PASS).
+- **Convergence** — `lens: gating` reviewer verdict CLEAN (no P0–P2) *and* machine gate
+  category PASS or `DOCS_INCONCLUSIVE_SCOPE_PASS` on the exact range.
 - **STOP** — the loop halts and writes a Human Gate Brief; nothing lands.
-- **PAUSED_LIMIT** — an agent hit a usage/rate limit or the provider is down; the loop
-  prints and emails a notice, waits for the reset, and resumes the *same* step. Not a
-  round, not a failure; becomes a STOP only if the pause budget runs out (design §5.6).
+- **PAUSED_LIMIT** — an agent hit a subscription/rate limit or the provider is down; the
+  loop prints/persists status, durably waits/checks on the ruled schedule, and resumes the *same* step.
+  It is not a round or failure and has no 12-hour recoverable-pause cutoff.
 - **Model / effort per role** — which model and reasoning effort each agent uses is set
-  per lane kind in `targets/<repo>.yaml` (design §5.5), recorded in the ledger on every run.
+  per lane kind in `projects/<project>/` agent/policy configuration (design §5.5), recorded in the ledger on every run.
 - **Human gate** — a point where only the operator can act (ruling, migration, deployment,
   Test validation, external authorization), detected from the manifest and diff.
-- **Mode A / Mode B** — unattended chaining of design phases with a decision inbox / a
-  per-phase operator checkpoint.
+- **Mode A / Mode B** — future unattended chaining with a decision inbox / V0 one-phase
+  execution that locally lands and stops; bookkeeping is a separate run.
 - **Decision inbox** — the accumulated open decisions (each phase's §9) awaiting operator
   rulings, with the downstream phases that consumed each at PROPOSED.
+- **Project Control Plane** — the AI-assist `projects/` tree that routes a project to its
+  repository, manifests, agents, skills, policies, plans, and project-local state.
 - **Ledger** — the orchestrator's append-only, digest-chained record of every invocation,
-  artifact, transition and counter (`runs/<target>/<lane>.jsonl`).
+  artifact, transition and counter
+  (`projects/<project>/state/runs/<run>/ledger.jsonl`).
 - **P0–P3** — severity gate from the collaboration contract: P0/P1 must fix; P2 fix when
   it touches irreversible writes, auditability or operational correctness; P3 backlog.
 - **CA** — corporate actions; the current 12-phase design epic on `trading-ai`.
