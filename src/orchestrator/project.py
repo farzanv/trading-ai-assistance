@@ -18,7 +18,12 @@ from pathlib import Path
 
 import yaml
 
-from orchestrator.model import GateCategory, LanePolicy
+from orchestrator.model import (
+    GateCategory,
+    HARD_MAX_AGENT_INVOCATIONS,
+    HARD_MAX_ROUNDS,
+    LanePolicy,
+)
 
 
 class ProjectError(Exception):
@@ -197,6 +202,21 @@ def load_project(projects_root: Path, project_id: str) -> ProjectConfig:
     )
 
 
+def _bounded_int(value: object, ceiling: int) -> int:
+    """A genuine positive integer at or below the hard ceiling.
+
+    Booleans, floats, and numeric strings are rejected — no coercion may loosen
+    a fail-closed bound, and a configured bound may only tighten the ceiling.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"bound must be an integer, got {type(value).__name__}")
+    if value < 1:
+        raise ValueError(f"bound must be positive, got {value}")
+    if value > ceiling:
+        raise ValueError(f"bound {value} exceeds the hard ceiling {ceiling}")
+    return value
+
+
 def _load_lane_policies(lanes_path: Path) -> tuple[tuple[str, LanePolicy], ...]:
     """Parse the project's lane policy file into typed, validated policies."""
     data = _load_yaml(lanes_path)
@@ -211,14 +231,14 @@ def _load_lane_policies(lanes_path: Path) -> tuple[tuple[str, LanePolicy], ...]:
             accepted = frozenset(
                 GateCategory(name) for name in cfg["accepted_gate_categories"]
             )
-            max_rounds = int(cfg["max_rounds"])
-            max_invocations = int(cfg["max_agent_invocations"])
+            max_rounds = _bounded_int(cfg["max_rounds"], HARD_MAX_ROUNDS)
+            max_invocations = _bounded_int(
+                cfg["max_agent_invocations"], HARD_MAX_AGENT_INVOCATIONS
+            )
             author_agent = str(cfg["author"]["agent"])
             reviewer_agent = str(cfg["reviewer"]["agent"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"{lanes_path}: lane {kind!r} policy invalid: {exc}") from None
-        if max_rounds < 1 or max_invocations < 1:
-            raise ProjectError(f"{lanes_path}: lane {kind!r} bounds must be positive")
         if author_agent == reviewer_agent:
             # Non-authoring review is structural: the same agent can never
             # hold both roles in one lane kind.

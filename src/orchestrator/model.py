@@ -198,13 +198,22 @@ class LaneIdentity:
     """Immutable lane binding fixed at authorization (architecture §4.1).
 
     Every artifact is validated against these values; a mismatch is a
-    malformed artifact, never a silently adopted new identity.
+    malformed artifact, never a silently adopted new identity. The identity is
+    ``(project_id, lane_id)``: a lane never exists outside its registered
+    project (PCP §2).
     """
 
+    project_id: str
     lane_id: str
     work_item: str
     scope_base: str  # full 40-hex SHA
     manifest: str  # target-repo-relative manifest path
+
+
+#: Hard ceilings no project policy may exceed (CLAUDE.md fail-closed bounds;
+#: design §5.6). A lane policy may be stricter, never looser.
+HARD_MAX_ROUNDS = 10
+HARD_MAX_AGENT_INVOCATIONS = 40
 
 
 @dataclass(frozen=True)
@@ -215,8 +224,8 @@ class LanePolicy:
 
     lane_kind: str
     accepted_gate_categories: frozenset[GateCategory]
-    max_rounds: int = 10
-    max_agent_invocations: int = 40
+    max_rounds: int = HARD_MAX_ROUNDS
+    max_agent_invocations: int = HARD_MAX_AGENT_INVOCATIONS
     author_agent: str = "claude"
     reviewer_agent: str = "codex"
 

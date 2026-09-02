@@ -17,6 +17,7 @@ from orchestrator.model import LaneIdentity
 from orchestrator.project import ProjectConfig, load_project
 
 BASE_SHA = "b" * 40
+PROJECT_ID = "sim-project"
 WORK_ITEM = "sim_phase"
 MANIFEST = "dil-engine/manifests/sim_phase.yaml"
 
@@ -38,13 +39,25 @@ GOOD_FACTS = GitFacts(
 )
 
 
-def make_identity(lane_id: str = "LANE-SIM") -> LaneIdentity:
+def make_identity(lane_id: str = "LANE-SIM", project_id: str = PROJECT_ID) -> LaneIdentity:
     return LaneIdentity(
-        lane_id=lane_id, work_item=WORK_ITEM, scope_base=BASE_SHA, manifest=MANIFEST
+        project_id=project_id,
+        lane_id=lane_id,
+        work_item=WORK_ITEM,
+        scope_base=BASE_SHA,
+        manifest=MANIFEST,
     )
 
 
-def make_test_project(root: Path, project_id: str = "sim-project") -> ProjectConfig:
+def make_replay_context(tmp_path: Path, *, lane_id: str, schemas: Any, run_id: str = "RUN-001"):
+    """The Control-Plane-resolved replay context for a build_coordinator run."""
+    from orchestrator.ledger import replay_context
+
+    project = load_project(tmp_path / "control-plane" / "projects", PROJECT_ID)
+    return replay_context(project, make_identity(lane_id), run_id, schemas)
+
+
+def make_test_project(root: Path, project_id: str = PROJECT_ID) -> ProjectConfig:
     """Write a minimal, containment-valid project tree and load it."""
     projects = root / "projects"
     project = projects / project_id

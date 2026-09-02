@@ -400,6 +400,24 @@ def test_guidance_without_guidance_block_is_malformed() -> None:
         check_guidance(raw, {"F1"})
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope_observations", ["foreign undeclared change"]),
+        ("findings", None),  # replaced below with a flagged P1 finding
+        ("prior_findings", [{"id": "F1", "outcome": "STILL_PRESENT"}]),
+    ],
+)
+def test_guidance_carrying_stop_bearing_content_is_malformed(field: str, value: object) -> None:
+    """R1-02: guidance is guidance-only — a stop-bearing field is never
+    accepted-and-discarded; the artifact is malformed."""
+    if field == "findings":
+        value = [make_finding("FX", "P1", requires_ruling=True)]
+    raw = make_guidance(["F1"], revision=1, **{field: value})
+    with pytest.raises(ArtifactError, match=field):
+        check_guidance(raw, {"F1"})
+
+
 # -- gate result -------------------------------------------------------------
 
 

@@ -24,7 +24,7 @@ from tests.fakes import (
     ScriptedReviewer,
     build_coordinator,
     make_author_result,
-    make_identity,
+    make_replay_context,
     make_review,
 )
 
@@ -35,7 +35,11 @@ POLICY = LanePolicy(
         {GateCategory.PASS, GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS}
     ),
 )
-IDENTITY = make_identity("LANE-T")
+
+
+def _ctx(tmp_path: Path, lane_id: str = "LANE-T"):
+    """The mandatory Control-Plane-resolved replay context for the test lane."""
+    return make_replay_context(tmp_path, lane_id=lane_id, schemas=SCHEMAS)
 
 
 def run_minimal_lane(tmp_path: Path) -> Path:
@@ -80,7 +84,7 @@ def test_valid_ledger_reads_and_replays(tmp_path: Path) -> None:
     assert entries[0].prev_digest == "0" * 64
     assert entries[0].payload["effect"] == "LANE_OPENED"
     assert [e.seq for e in entries] == list(range(1, len(entries) + 1))
-    snapshot = replay(path, POLICY, IDENTITY, SCHEMAS)
+    snapshot = replay(path, _ctx(tmp_path))
     assert snapshot.state is LaneState.LANDING
     assert snapshot.review_round == 1
     assert snapshot.agent_invocations == 2
@@ -167,7 +171,7 @@ def test_chain_aware_transition_forgery_fails_replay(tmp_path: Path) -> None:
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_chain_aware_predicate_input_forgery_fails_replay(tmp_path: Path) -> None:
@@ -179,7 +183,7 @@ def test_chain_aware_predicate_input_forgery_fails_replay(tmp_path: Path) -> Non
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="predicate inputs"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_chain_aware_snapshot_forgery_fails_replay(tmp_path: Path) -> None:
@@ -191,7 +195,7 @@ def test_chain_aware_snapshot_forgery_fails_replay(tmp_path: Path) -> None:
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="snapshot"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_chain_aware_artifact_digest_forgery_fails_replay(tmp_path: Path) -> None:
@@ -203,7 +207,7 @@ def test_chain_aware_artifact_digest_forgery_fails_replay(tmp_path: Path) -> Non
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="digest does not match"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_mutated_artifact_file_fails_replay(tmp_path: Path) -> None:
@@ -214,7 +218,7 @@ def test_mutated_artifact_file_fails_replay(tmp_path: Path) -> None:
     raw["verdict"] = "FINDINGS"
     target.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
     with pytest.raises(LedgerReplayError, match="digest does not match"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_deleted_effect_evidence_fails_replay(tmp_path: Path) -> None:
@@ -227,7 +231,7 @@ def test_deleted_effect_evidence_fails_replay(tmp_path: Path) -> None:
     del lines[planned]
     _rewrite(path, _rechain(lines))
     with pytest.raises(LedgerReplayError):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_swapped_artifact_with_forged_digest_and_chain_fails_replay(tmp_path: Path) -> None:
@@ -250,7 +254,7 @@ def test_swapped_artifact_with_forged_digest_and_chain_fails_replay(tmp_path: Pa
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="fails re-validation"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_swapped_valid_but_different_artifact_fails_replay(tmp_path: Path) -> None:
@@ -293,37 +297,120 @@ def test_swapped_valid_but_different_artifact_fails_replay(tmp_path: Path) -> No
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="does not derive the ledgered event"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_replay_refuses_a_different_lane_identity(tmp_path: Path) -> None:
     path = run_minimal_lane(tmp_path)
     with pytest.raises(LedgerReplayError, match="different lane identity"):
-        replay(path, POLICY, make_identity("LANE-OTHER"), SCHEMAS)
+        replay(path, _ctx(tmp_path, lane_id="LANE-OTHER"))
 
 
-def test_replay_verifies_caller_supplied_project_context(tmp_path: Path) -> None:
+def test_replay_refuses_a_different_run(tmp_path: Path) -> None:
     path = run_minimal_lane(tmp_path)
-    with pytest.raises(LedgerReplayError, match="different project packages"):
-        replay(
-            path,
-            POLICY,
-            IDENTITY,
-            SCHEMAS,
-            expected_package_digests=(("agents.author", "0" * 64),),
-        )
-    with pytest.raises(LedgerReplayError, match="different project configuration"):
-        replay(path, POLICY, IDENTITY, SCHEMAS, expected_config_digest="0" * 64)
+    other_run = make_replay_context(
+        tmp_path, lane_id="LANE-T", schemas=SCHEMAS, run_id="RUN-002"
+    )
+    with pytest.raises(LedgerReplayError, match="different run"):
+        replay(path, other_run)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("project_id", "other-project", "different project"),
+        ("run_id", "RUN-999", "different run"),
+        ("package_digests", [["agents.author", "0" * 64]], "different project packages"),
+        ("config_digest", "0" * 64, "different project configuration"),
+        ("work_index_digest", "0" * 64, "different work index"),
+    ],
+)
+def test_forged_lane_opened_binding_fails_replay(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    """R1-05: every Control Plane binding is mandatory — a rechained ledger
+    claiming a different project, run, or digest set never replays."""
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "LANE_OPENED":
+            raw["payload"][field] = value
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match=message):
+        replay(path, _ctx(tmp_path))
 
 
 def test_replay_refuses_a_different_lane_policy(tmp_path: Path) -> None:
+    import dataclasses
+
     path = run_minimal_lane(tmp_path)
-    other = LanePolicy(
-        lane_kind="design",
-        accepted_gate_categories=frozenset({GateCategory.PASS}),
+    other = dataclasses.replace(
+        _ctx(tmp_path),
+        policy=LanePolicy(
+            lane_kind="design",
+            accepted_gate_categories=frozenset({GateCategory.PASS}),
+        ),
     )
     with pytest.raises(LedgerReplayError, match="different lane policy"):
-        replay(path, other, IDENTITY, SCHEMAS)
+        replay(path, other)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("invocation_id", "LANE-T-I999"),
+        ("role", "ghost"),
+        ("action", "GHOST"),
+        ("attempt", 9),
+        ("counted", False),
+        ("extra_key", True),
+    ],
+)
+def test_forged_invocation_evidence_fails_replay(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """R1-06: INVOCATION_PLANNED is reconstructed in full from the replayed
+    command and snapshot — no field of the evidence is free."""
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "INVOCATION_PLANNED":
+            raw["payload"][field] = value
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="INVOCATION_PLANNED"):
+        replay(path, _ctx(tmp_path))
+
+
+def test_forged_accepted_artifact_provenance_fails_replay(tmp_path: Path) -> None:
+    """R1-06: acceptance evidence is bound to the reconstructed invocation."""
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "ARTIFACT_ACCEPTED":
+            raw["payload"]["invocation_id"] = "LANE-T-I999"
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="accepted artifact evidence"):
+        replay(path, _ctx(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("end", "STOPPED"), ("reason", "CONVERGED_FAKE"), ("state", "COMPLETED")],
+)
+def test_forged_run_end_fails_replay(tmp_path: Path, field: str, value: str) -> None:
+    """R1-06: the complete RUN_END payload derives from the terminal decision."""
+    path = run_minimal_lane(tmp_path)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "RUN_END":
+            raw["payload"][field] = value
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="RUN_END"):
+        replay(path, _ctx(tmp_path))
 
 
 def test_replay_refuses_an_incomplete_run(tmp_path: Path) -> None:
@@ -331,7 +418,7 @@ def test_replay_refuses_an_incomplete_run(tmp_path: Path) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
     _rewrite(path, _rechain(lines[:-1]))  # drop RUN_END
     with pytest.raises(LedgerReplayError, match="RUN_END"):
-        replay(path, POLICY, IDENTITY, SCHEMAS)
+        replay(path, _ctx(tmp_path))
 
 
 def test_append_continues_an_existing_chain(tmp_path: Path) -> None:

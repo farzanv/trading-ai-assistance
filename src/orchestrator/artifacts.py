@@ -472,6 +472,17 @@ def validate_guidance(
         errors.append("reviewer agent is not the lane's authorized reviewer")
     if raw.get("handoff") is not None:
         errors.append("handoff provenance is not authorized for this lane")
+    # Guidance is guidance-only: stop-bearing review content (scope
+    # observations, findings with routing flags, prior reconciliation) must
+    # arrive through a gating review, where the reducer routes it to a STOP.
+    # A guidance artifact carrying any of it is malformed — retry once, then
+    # STOP — never accepted with the stop-bearing content discarded.
+    if raw["scope_observations"]:
+        errors.append("guidance artifact carries scope observations (stop-bearing)")
+    if raw["findings"]:
+        errors.append("guidance artifact carries findings (not a guidance channel)")
+    if raw["prior_findings"]:
+        errors.append("guidance artifact carries prior-finding assessments")
     guidance = raw.get("guidance")
     if guidance is None:
         errors.append("guidance block missing")

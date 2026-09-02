@@ -39,21 +39,29 @@ from orchestrator.artifacts import (
 )
 from orchestrator.model import (
     AuthorResultAccepted,
+    Command,
     Event,
     FoldAccepted,
     GuidanceAccepted,
+    InvokeAuthor,
+    InvokeGuidance,
+    InvokeReviewer,
+    LandRevision,
     LaneIdentity,
     LanePolicy,
     LaneSnapshot,
     Lens,
+    OpenHumanGate,
     REVIEW_KIND_FOR_LANE_KIND,
     ReviewAccepted,
     RevisionVerified,
+    VerifyRevision,
     event_from_dict,
     event_to_dict,
     policy_digest,
     snapshot_to_dict,
 )
+from orchestrator.project import ProjectConfig, validate_identifier
 from orchestrator.reducer import reduce
 
 GENESIS_DIGEST = "0" * 64
@@ -84,8 +92,16 @@ _LANE_OPENED_KEYS = frozenset(
         "work_index_digest",
     }
 )
-_AGENT_COMMANDS = frozenset({"InvokeAuthor", "InvokeReviewer", "InvokeGuidance"})
-_TERMINAL_COMMANDS = frozenset({None, "OpenHumanGate", "LandRevision"})
+_INVOCATION_PLANNED_KEYS = frozenset(
+    {"effect", "invocation_id", "role", "action", "attempt", "counted", "invocation_number"}
+)
+_ARTIFACT_ACCEPTED_KEYS = frozenset({"effect", "artifact", "invocation_id", "digest", "path"})
+_ARTIFACT_REJECTED_KEYS = frozenset({"effect", "artifact", "invocation_id", "errors"})
+_GIT_FACTS_KEYS = frozenset(
+    {"exists", "tree_digest", "descends_from_scope_base", "descends_from_previous_candidate"}
+)
+#: Artifact kinds whose acceptance must carry Git candidate facts.
+_GIT_BACKED_ARTIFACTS = frozenset({"author-result", "fold"})
 
 #: Accepted-event kind -> the artifact kind that must precede it.
 _EVENT_ARTIFACT_KIND = {
@@ -111,6 +127,74 @@ class LedgerError(Exception):
 
 class LedgerReplayError(LedgerError):
     """Replaying the recorded evidence does not reproduce the recorded run."""
+
+
+def run_end_kind(command: Command | None) -> str:
+    """The RUN_END ``end`` value a terminal decision produces.
+
+    Single authority shared by the coordinator (writing) and replay
+    (re-deriving): a RUN_END payload is a pure function of the terminal
+    decision, never free-recorded evidence.
+    """
+    if isinstance(command, LandRevision):
+        return "CONVERGED_V0A_NO_LANDING"  # V0-A boundary: landing is not implemented
+    if isinstance(command, OpenHumanGate):
+        return "HUMAN_GATE"
+    return "STOPPED"
+
+
+def _is_terminal(command: Command | None) -> bool:
+    return command is None or isinstance(command, (OpenHumanGate, LandRevision))
+
+
+@dataclass(frozen=True)
+class ReplayContext:
+    """The complete expected Control Plane context for one replay.
+
+    Built via :func:`replay_context` from the REGISTERED project configuration
+    — every binding (project identity, run, lane identity, policy, schema set,
+    package/config/work-index digests) is mandatory and verified against the
+    ledger's LANE_OPENED record. Nothing is optional: a replay can never
+    silently skip a binding the Control Plane can supply.
+    """
+
+    run_id: str
+    identity: LaneIdentity
+    policy: LanePolicy
+    schemas: SchemaSet
+    package_digests: tuple[tuple[str, str], ...]
+    config_digest: str
+    work_index_digest: str
+
+
+def replay_context(
+    project: ProjectConfig,
+    identity: LaneIdentity,
+    run_id: str,
+    schemas: SchemaSet,
+) -> ReplayContext:
+    """Resolve the immutable replay context from the registered project.
+
+    The policy comes from the project's lane policy for the declared work-item
+    kind — the same resolution the coordinator uses — so a replay caller cannot
+    substitute a different policy or digest set than the Control Plane's.
+    """
+    if identity.project_id != project.project_id:
+        raise LedgerReplayError(
+            f"identity project {identity.project_id!r} is not the resolved project "
+            f"{project.project_id!r}"
+        )
+    validate_identifier("run", run_id)
+    work_item = project.work_item(identity.work_item)
+    return ReplayContext(
+        run_id=run_id,
+        identity=identity,
+        policy=project.lane_policy(work_item.kind),
+        schemas=schemas,
+        package_digests=project.package_digests,
+        config_digest=project.config_digest,
+        work_index_digest=project.work_index_digest,
+    )
 
 
 def _canonical(data: Mapping[str, Any]) -> str:
@@ -234,17 +318,36 @@ def _load_artifact(path: Path) -> Mapping[str, Any]:
         raise LedgerReplayError(f"accepted artifact unreadable: {path.name}: {exc}") from None
 
 
+def _expected_invocation(seq: int, command: Command) -> tuple[str, str | None, bool]:
+    """(role, action, counted) the coordinator MUST have planned for a command."""
+    if isinstance(command, InvokeAuthor):
+        return "author", command.action.value, True
+    if isinstance(command, InvokeReviewer):
+        return "reviewer", "REVIEW", True
+    if isinstance(command, InvokeGuidance):
+        return "reviewer", "GUIDANCE", True
+    if isinstance(command, VerifyRevision):
+        return "gate", None, False
+    raise LedgerReplayError(f"seq {seq}: command {command.kind} plans no invocation")
+
+
 def _check_effect_gap(
     seq: int,
     gap: list[LedgerEntry],
-    prev_command: str | None,
+    prev_command: Command | None,
     event_payload: Mapping[str, Any],
-    invocations_after_prev: int,
+    snapshot: LaneSnapshot,
+    identity: LaneIdentity,
     artifacts_dir: Path,
 ) -> Mapping[str, Any] | None:
     """The effects between two decisions must match the issued command and the
     event the next decision consumed — invocation planned, then exactly one
     accepted (digest-bound) or rejected artifact of the right kind.
+
+    Every effect payload is reconstructed in full from the replayed command,
+    snapshot, and lane identity, then compared for exact equality — no field
+    of the evidence is free (a chain-aware forger cannot rewrite roles,
+    actions, attempts, invocation ids, or artifact paths).
 
     Returns the ARTIFACT_ACCEPTED payload for an accepted event (so the caller
     can re-validate the artifact content), or None for rejections/authorization.
@@ -256,33 +359,55 @@ def _check_effect_gap(
         return None
     if len(gap) != 2:
         raise LedgerReplayError(
-            f"seq {seq}: expected invocation+artifact evidence for {prev_command}, "
+            f"seq {seq}: expected invocation+artifact evidence for {prev_command.kind}, "
             f"found {len(gap)} effect(s)"
         )
     planned, outcome = gap[0].payload, gap[1].payload
-    if planned.get("effect") != "INVOCATION_PLANNED":
-        raise LedgerReplayError(f"seq {seq}: missing INVOCATION_PLANNED for {prev_command}")
-    counted = prev_command in _AGENT_COMMANDS
-    if bool(planned.get("counted")) != counted:
-        raise LedgerReplayError(f"seq {seq}: invocation counted flag disagrees with {prev_command}")
-    if counted and planned.get("invocation_number") != invocations_after_prev:
+    role, action, counted = _expected_invocation(seq, prev_command)
+    invocation_id = f"{identity.lane_id}-I{snapshot.agent_invocations:03d}"
+    expected_planned = {
+        "effect": "INVOCATION_PLANNED",
+        "invocation_id": invocation_id,
+        "role": role,
+        "action": action,
+        "attempt": snapshot.artifact_retries,
+        "counted": counted,
+        "invocation_number": snapshot.agent_invocations if counted else None,
+    }
+    if _norm(planned) != _norm(expected_planned):
         raise LedgerReplayError(
-            f"seq {seq}: invocation number {planned.get('invocation_number')} != "
-            f"counter {invocations_after_prev}"
+            f"seq {seq}: INVOCATION_PLANNED evidence does not match the issued "
+            f"{prev_command.kind}"
         )
     if event_kind == "ArtifactRejected":
         expected_kind = _AWAITING_ARTIFACT_KIND[event_payload["artifact"]]
-        if outcome.get("effect") != "ARTIFACT_REJECTED" or outcome.get("artifact") != expected_kind:
-            raise LedgerReplayError(f"seq {seq}: rejected artifact evidence missing or wrong kind")
+        if (
+            set(outcome) != _ARTIFACT_REJECTED_KEYS
+            or outcome["effect"] != "ARTIFACT_REJECTED"
+            or outcome["artifact"] != expected_kind
+            or outcome["invocation_id"] != invocation_id
+            or not isinstance(outcome["errors"], list)
+            or not all(isinstance(item, str) for item in outcome["errors"])
+        ):
+            raise LedgerReplayError(f"seq {seq}: rejected artifact evidence missing or forged")
         return None
     expected_kind = _EVENT_ARTIFACT_KIND.get(event_kind)
     if expected_kind is None:
         raise LedgerReplayError(f"seq {seq}: no artifact contract for event {event_kind}")
-    if outcome.get("effect") != "ARTIFACT_ACCEPTED" or outcome.get("artifact") != expected_kind:
-        raise LedgerReplayError(f"seq {seq}: accepted artifact evidence missing or wrong kind")
+    expected_keys = _ARTIFACT_ACCEPTED_KEYS | (
+        {"git"} if expected_kind in _GIT_BACKED_ARTIFACTS else set()
+    )
+    if (
+        set(outcome) != expected_keys
+        or outcome["effect"] != "ARTIFACT_ACCEPTED"
+        or outcome["artifact"] != expected_kind
+        or outcome["invocation_id"] != invocation_id
+        or outcome["path"] != f"{invocation_id}-{expected_kind}.json"
+    ):
+        raise LedgerReplayError(f"seq {seq}: accepted artifact evidence missing or forged")
     raw = _load_artifact(artifacts_dir / outcome["path"])
     actual = hashlib.sha256(_canonical(raw).encode("utf-8")).hexdigest()
-    if outcome.get("digest") != actual:
+    if outcome["digest"] != actual:
         raise LedgerReplayError(
             f"seq {seq}: artifact {outcome['path']} digest does not match the ledger"
         )
@@ -380,7 +505,7 @@ def _rederive_event(
 
 def _check_git_block(seq: int, outcome: Mapping[str, Any], claimed_tree: str) -> None:
     git = outcome.get("git")
-    if not isinstance(git, Mapping):
+    if not isinstance(git, Mapping) or set(git) != _GIT_FACTS_KEYS:
         raise LedgerReplayError(f"seq {seq}: candidate git facts missing from acceptance")
     if not (
         git.get("exists") is True
@@ -393,26 +518,25 @@ def _check_git_block(seq: int, outcome: Mapping[str, Any], claimed_tree: str) ->
 
 def replay(
     path: Path,
-    policy: LanePolicy,
-    identity: LaneIdentity,
-    schemas: SchemaSet,
+    context: ReplayContext,
     *,
-    expected_package_digests: tuple[tuple[str, str], ...] | None = None,
-    expected_config_digest: str | None = None,
-    expected_work_index_digest: str | None = None,
     artifacts_dir: Path | None = None,
 ) -> LaneSnapshot:
     """Validate the chain and replay the COMPLETE recorded run.
 
-    Checks, in order: the LANE_OPENED binding against the CALLER-supplied
-    policy, identity, schema set, and (when given) package/config/work-index
-    digests — never the ledger's self-recorded provenance alone; the effect
-    protocol around every decision; every accepted artifact's file digest AND
-    its re-validation in the replayed lane context, requiring that it derives
-    exactly the ledgered typed event; and — for every DECISION — that
+    Checks, in order: the LANE_OPENED binding against EVERY field of the
+    Control-Plane-resolved :class:`ReplayContext` — project, run, lane
+    identity, policy, schema set, and package/config/work-index digests, all
+    mandatory, never the ledger's self-recorded provenance alone; the effect
+    protocol around every decision, with every effect payload reconstructed in
+    full from the replayed command and snapshot; every accepted artifact's
+    file digest AND its re-validation in the replayed lane context, requiring
+    that it derives exactly the ledgered typed event; for every DECISION, that
     re-running the pure reducer reproduces the recorded snapshot, reason,
-    command, and predicate inputs exactly. Returns the final proved snapshot.
+    command, and predicate inputs exactly; and that the RUN_END payload is
+    exactly what the terminal decision derives. Returns the proved snapshot.
     """
+    policy, identity, schemas = context.policy, context.identity, context.schemas
     entries = read_entries(path)
     if not entries:
         raise LedgerReplayError("empty ledger")
@@ -425,6 +549,10 @@ def replay(
         raise LedgerReplayError("ledger was opened under a different lane policy")
     if opened.payload["schemas_digest"] != schemas.digest:
         raise LedgerReplayError("ledger was opened under a different schema set")
+    if opened.payload["project_id"] != identity.project_id:
+        raise LedgerReplayError("ledger was opened under a different project")
+    if opened.payload["run_id"] != context.run_id:
+        raise LedgerReplayError("ledger was opened under a different run")
     if (
         opened.lane_id != identity.lane_id
         or opened.payload["work_item"] != identity.work_item
@@ -433,29 +561,23 @@ def replay(
         or opened.payload["lane_kind"] != policy.lane_kind
     ):
         raise LedgerReplayError("ledger was opened under a different lane identity")
-    if expected_package_digests is not None and _norm(opened.payload["package_digests"]) != _norm(
-        [list(pair) for pair in expected_package_digests]
+    if _norm(opened.payload["package_digests"]) != _norm(
+        [list(pair) for pair in context.package_digests]
     ):
         raise LedgerReplayError("ledger was opened under different project packages")
-    if (
-        expected_config_digest is not None
-        and opened.payload["config_digest"] != expected_config_digest
-    ):
+    if opened.payload["config_digest"] != context.config_digest:
         raise LedgerReplayError("ledger was opened under a different project configuration")
-    if (
-        expected_work_index_digest is not None
-        and opened.payload["work_index_digest"] != expected_work_index_digest
-    ):
+    if opened.payload["work_index_digest"] != context.work_index_digest:
         raise LedgerReplayError("ledger was opened under a different work index")
     if artifacts_dir is None:
-        artifacts_dir = path.parent / "lanes" / opened.lane_id / "artifacts"
+        artifacts_dir = path.parent / "lanes" / identity.lane_id / "artifacts"
 
     snapshot = LaneSnapshot()
-    prev_command: str | None = None
+    prev_command: Command | None = None
+    last_reason: str | None = None
     gap: list[LedgerEntry] = []
     saw_run_end = False
     decision_count = 0
-    last_decision_command: str | None = None
     for entry in entries[1:]:
         if saw_run_end:
             raise LedgerReplayError(f"seq {entry.seq}: evidence after RUN_END")
@@ -466,10 +588,19 @@ def replay(
             if effect == "LANE_OPENED":
                 raise LedgerReplayError(f"seq {entry.seq}: duplicate LANE_OPENED")
             if effect == "RUN_END":
-                if decision_count == 0 or prev_command not in _TERMINAL_COMMANDS or gap:
+                if decision_count == 0 or not _is_terminal(prev_command) or gap:
                     raise LedgerReplayError(f"seq {entry.seq}: RUN_END without a terminal decision")
-                if entry.payload.get("state") != snapshot.state.value:
-                    raise LedgerReplayError(f"seq {entry.seq}: RUN_END state disagrees with replay")
+                expected_end = {
+                    "effect": "RUN_END",
+                    "end": run_end_kind(prev_command),
+                    "reason": last_reason,
+                    "state": snapshot.state.value,
+                }
+                if _norm(entry.payload) != _norm(expected_end):
+                    raise LedgerReplayError(
+                        f"seq {entry.seq}: RUN_END payload does not derive from the "
+                        f"terminal decision"
+                    )
                 saw_run_end = True
                 continue
             gap.append(entry)
@@ -483,7 +614,8 @@ def replay(
             gap,
             prev_command,
             payload["event"],
-            snapshot.agent_invocations,
+            snapshot,
+            identity,
             artifacts_dir,
         )
         gap = []
@@ -515,11 +647,11 @@ def replay(
         if _norm(payload["snapshot_after"]) != _norm(snapshot_to_dict(decision.snapshot)):
             raise LedgerReplayError(f"seq {entry.seq}: recorded snapshot disagrees with replay")
         snapshot = decision.snapshot
-        prev_command = replayed_command
-        last_decision_command = replayed_command
+        prev_command = decision.command
+        last_reason = decision.reason.value
         decision_count += 1
     if not saw_run_end:
         raise LedgerReplayError("ledger has no RUN_END (incomplete run)")
-    if last_decision_command not in _TERMINAL_COMMANDS:
+    if not _is_terminal(prev_command):
         raise LedgerReplayError("final decision did not terminate the run")
     return snapshot

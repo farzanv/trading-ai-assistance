@@ -79,6 +79,21 @@ def test_guidance_lens_requires_the_guidance_block() -> None:
         _validator("review.schema.json").validate(review)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope_observations", ["foreign undeclared change"]),
+        ("findings", [make_finding("FX", "P1")]),
+        ("prior_findings", [{"id": "F1", "outcome": "STILL_PRESENT"}]),
+    ],
+)
+def test_guidance_lens_is_structurally_guidance_only(field: str, value: object) -> None:
+    """R1-02: lens=guidance prohibits every stop-bearing review field."""
+    guidance = make_guidance(["F1"], **{field: value})
+    with pytest.raises(ValidationError):
+        _validator("review.schema.json").validate(guidance)
+
+
 def test_gating_code_review_requires_the_security_checklist() -> None:
     review = make_review(
         verdict="FINDINGS", findings=[make_finding("F1")], review_kind="code"

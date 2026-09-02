@@ -164,8 +164,16 @@
       }
     },
     {
+      "$comment": "guidance is guidance-only: no findings, no prior reconciliation, no scope observations — stop-bearing content must arrive through a gating review (protocol §6)",
       "if": { "properties": { "lens": { "const": "guidance" } } },
-      "then": { "required": ["guidance"] }
+      "then": {
+        "required": ["guidance"],
+        "properties": {
+          "findings": { "maxItems": 0 },
+          "prior_findings": { "maxItems": 0 },
+          "scope_observations": { "maxItems": 0 }
+        }
+      }
     },
     {
       "if": { "properties": { "review_kind": { "const": "code" }, "lens": { "const": "gating" } } },

@@ -45,7 +45,7 @@ from orchestrator.artifacts import (
     validate_guidance,
     validate_review,
 )
-from orchestrator.ledger import KIND_DECISION, KIND_EFFECT, Ledger
+from orchestrator.ledger import KIND_DECISION, KIND_EFFECT, Ledger, run_end_kind
 from orchestrator.model import (
     AgentAction,
     ArtifactRejected,
@@ -105,6 +105,11 @@ class LaneCoordinator:
         clock: Callable[[], str] = _utc_now,
     ) -> None:
         validate_identifier("lane", identity.lane_id)
+        if identity.project_id != project.project_id:
+            raise CoordinatorError(
+                f"lane identity project {identity.project_id!r} is not the registered "
+                f"project {project.project_id!r}"
+            )
         if not _FULL_SHA_RE.fullmatch(identity.scope_base):
             raise CoordinatorError("scope_base must be a full 40-hex SHA")
         work_item = project.work_item(identity.work_item)  # must be declared, never inferred
@@ -200,18 +205,18 @@ class LaneCoordinator:
         )
 
     def _end_run(self, snapshot: LaneSnapshot, command: Command | None, reason: str) -> None:
-        if isinstance(command, LandRevision):
-            end = "CONVERGED_V0A_NO_LANDING"  # V0-A boundary: landing is not implemented
-        elif isinstance(command, OpenHumanGate):
-            end = "HUMAN_GATE"
-        else:
-            end = "STOPPED"
         self._write_p3_backlog(snapshot)
+        # run_end_kind is the single authority replay re-derives this from.
         self._ledger.append(
             KIND_EFFECT,
             self._identity.lane_id,
             self._clock(),
-            {"effect": "RUN_END", "end": end, "reason": reason, "state": snapshot.state.value},
+            {
+                "effect": "RUN_END",
+                "end": run_end_kind(command),
+                "reason": reason,
+                "state": snapshot.state.value,
+            },
         )
 
     def _write_p3_backlog(self, snapshot: LaneSnapshot) -> None:

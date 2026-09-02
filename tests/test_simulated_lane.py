@@ -12,9 +12,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from orchestrator.artifacts import load_schema_set
 from orchestrator.ledger import read_entries, replay
-from orchestrator.model import FindingState, GateCategory, LanePolicy, LaneState, ReasonCode
+from orchestrator.model import FindingState, LaneState, ReasonCode
 
 from tests.fakes import (
     ScriptedAuthor,
@@ -25,19 +27,17 @@ from tests.fakes import (
     make_finding,
     make_fold,
     make_guidance,
-    make_identity,
+    make_replay_context,
     make_review,
     tree,
 )
 
 SCHEMAS = load_schema_set(Path(__file__).resolve().parents[1] / "schemas" / "v2")
-POLICY = LanePolicy(
-    lane_kind="design",
-    accepted_gate_categories=frozenset(
-        {GateCategory.PASS, GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS}
-    ),
-)
 CLOCK = lambda: "2026-09-01T00:00:00+00:00"  # noqa: E731 - fixed clock; never a reducer input
+
+
+def replay_ctx(tmp_path: Path, lane_id: str):
+    return make_replay_context(tmp_path, lane_id=lane_id, schemas=SCHEMAS)
 
 
 def coordinator_for(tmp_path: Path, *, lane_id: str, author, reviewer, gate):
@@ -151,10 +151,7 @@ def test_simulated_lane_ledger_is_complete_and_replayable(tmp_path: Path) -> Non
 
     # Replay re-runs the pure reducer over every recorded event, enforces the
     # effect protocol, and re-verifies every persisted artifact digest.
-    assert (
-        replay(result.ledger_path, POLICY, make_identity(lane_id="LANE-SIM"), SCHEMAS)
-        == result.snapshot
-    )
+    assert replay(result.ledger_path, replay_ctx(tmp_path, "LANE-SIM")) == result.snapshot
 
 
 def test_two_identical_runs_are_deterministic(tmp_path: Path) -> None:
@@ -222,10 +219,7 @@ def test_second_malformed_review_stops_the_lane(tmp_path: Path) -> None:
     entries = read_entries(result.ledger_path)
     last_decision = [e for e in entries if e.kind == "DECISION"][-1]
     assert last_decision.payload["reason"] == ReasonCode.MALFORMED_ARTIFACT_STOP.value
-    assert (
-        replay(result.ledger_path, POLICY, make_identity(lane_id="LANE-STOP"), SCHEMAS).state
-        is LaneState.STOPPED
-    )
+    assert replay(result.ledger_path, replay_ctx(tmp_path, "LANE-STOP")).state is LaneState.STOPPED
 
 
 def test_unbound_review_naming_a_foreign_revision_stops_the_lane(tmp_path: Path) -> None:
@@ -402,10 +396,7 @@ def test_fixable_gate_failure_is_repaired_and_reconciled_by_the_reviewer(tmp_pat
     assert result.snapshot.state is LaneState.LANDING
     record = result.snapshot.finding("SYS-FIXABLE_TEST")
     assert record.state is FindingState.VERIFIED_RESOLVED
-    assert (
-        replay(result.ledger_path, POLICY, make_identity(lane_id="LANE-SYSGATE"), SCHEMAS)
-        == result.snapshot
-    )
+    assert replay(result.ledger_path, replay_ctx(tmp_path, "LANE-SYSGATE")) == result.snapshot
 
 
 def test_review_omitting_the_sys_gate_finding_is_malformed(tmp_path: Path) -> None:
@@ -460,3 +451,68 @@ def test_wrong_review_kind_for_the_lane_is_malformed(tmp_path: Path) -> None:
     )
     result = coordinator.run()
     assert result.snapshot.state is LaneState.STOPPED
+
+
+def test_guidance_carrying_stop_bearing_content_is_malformed(tmp_path: Path) -> None:
+    """R1-02: guidance is guidance-only. Scope observations and flagged
+    findings must arrive through a gating review; a guidance artifact carrying
+    them is malformed (retry once, then STOP) — never accepted with the
+    stop-bearing content silently discarded."""
+    with_scope = make_guidance(
+        ["F1"], revision=2, scope_observations=["foreign undeclared change"]
+    )
+    with_flagged_finding = make_guidance(
+        ["F1"],
+        revision=2,
+        findings=[make_finding("FX", "P1", requires_ruling=True)],
+    )
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-GUIDE",
+        author=ScriptedAuthor(
+            author_results=[make_author_result()],
+            folds=[make_fold(revision=2, dispositions={"F1": "FOLDED"})],
+        ),
+        reviewer=ScriptedReviewer(
+            reviews=[
+                make_review(revision=1, verdict="FINDINGS", findings=[make_finding("F1", "P1")]),
+                make_review(revision=2, verdict="FINDINGS", prior={"F1": "STILL_PRESENT"}),
+            ],
+            guidances=[with_scope, with_flagged_finding],
+        ),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED
+    entries = read_entries(result.ledger_path)
+    last_decision = [e for e in entries if e.kind == "DECISION"][-1]
+    assert last_decision.payload["reason"] == ReasonCode.MALFORMED_ARTIFACT_STOP.value
+    rejected = [
+        e.payload
+        for e in entries
+        if e.kind == "EFFECT" and e.payload.get("effect") == "ARTIFACT_REJECTED"
+    ]
+    assert len(rejected) == 2 and all(r["artifact"] == "guidance" for r in rejected)
+    assert any("scope_observations" in err for err in rejected[0]["errors"])
+    assert any("findings" in err for err in rejected[1]["errors"])
+
+
+def test_identity_for_a_different_project_is_refused(tmp_path: Path) -> None:
+    """R1-05: the lane identity is (project_id, lane_id); a coordinator never
+    opens a lane whose identity names another project."""
+    from orchestrator.application import CoordinatorError, LaneCoordinator
+    from tests.fakes import FakeGit, make_identity, make_test_project
+
+    project = make_test_project(tmp_path / "control-plane")
+    with pytest.raises(CoordinatorError, match="registered project"):
+        LaneCoordinator(
+            project=project,
+            identity=make_identity("LANE-X", project_id="other-project"),
+            run_id="RUN-001",
+            schemas=SCHEMAS,
+            author=ScriptedAuthor(),
+            reviewer=ScriptedReviewer(),
+            gate=ScriptedGate(),
+            git=FakeGit(),
+            clock=CLOCK,
+        )

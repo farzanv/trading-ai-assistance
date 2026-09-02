@@ -227,3 +227,43 @@ def test_missing_lanes_block_fails_closed(tmp_path: Path) -> None:
     (projects / "p1" / "policies" / "lanes.yaml").write_text("x: 1\n", encoding="utf-8")
     with pytest.raises(ProjectError, match="missing lanes block"):
         load_project(projects, "p1")
+
+
+@pytest.mark.parametrize(
+    ("field", "default", "yaml_value"),
+    [
+        # R3-01: the hard ceilings (10 rounds / 40 invocations) bind every
+        # project policy; a configured bound may only tighten them.
+        ("max_rounds", "10", "999"),
+        ("max_rounds", "10", "11"),
+        ("max_agent_invocations", "40", "999"),
+        ("max_agent_invocations", "40", "41"),
+        # Not genuine integers: booleans, floats, and numeric strings are
+        # rejected, never coerced.
+        ("max_rounds", "10", "true"),
+        ("max_rounds", "10", "10.0"),
+        ("max_rounds", "10", "'10'"),
+        ("max_agent_invocations", "40", "true"),
+        ("max_agent_invocations", "40", "'40'"),
+        # Non-positive bounds fail closed.
+        ("max_rounds", "10", "0"),
+        ("max_agent_invocations", "40", "-1"),
+    ],
+)
+def test_lane_policy_bounds_reject_loosening_and_coercion(
+    tmp_path: Path, field: str, default: str, yaml_value: str
+) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    lanes = projects / "p1" / "policies" / "lanes.yaml"
+    lanes.write_text(
+        lanes.read_text(encoding="utf-8").replace(f"{field}: {default}", f"{field}: {yaml_value}"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ProjectError, match="policy invalid"):
+        load_project(projects, "p1")
+
+
+def test_lane_policy_bounds_at_the_ceiling_load(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    policy = load_project(projects, "p1").lane_policy("design")
+    assert policy.max_rounds == 10 and policy.max_agent_invocations == 40
