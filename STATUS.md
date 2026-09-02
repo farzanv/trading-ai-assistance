@@ -4,14 +4,14 @@
 
 | Item | State |
 |---|---|
-| Repository | V0-A walking skeleton rev 5 DELIVERED 2026-09-01 (manifest `manifests/v0a_walking_skeleton.yaml`) — Codex round-4 review folded (R1-02 and R1-05 completion gaps closed); awaiting Codex re-review |
+| Repository | V0-A walking skeleton CONVERGED 2026-09-01 — Codex verdict CLEAN on rev 5 (`103020f..9da984b`, five review rounds, all findings VERIFIED_RESOLVED). Approval covers the V0-A slice only; V0-B and live execution unapproved |
 | Design | Governing design rev 3 (`103020f`, operator-approved architecture baseline for implementation) plus Python architecture, Project Control Plane, and review/repair protocol |
-| Build plan | T0 (target RVA JSON contract) still outstanding on the `trading-ai` side; V0-A done pending review; V0-B (real drivers, verify/land split, recovery, limits, console, `assist` commands) next |
+| Build plan | T0 (target RVA JSON contract) still outstanding on the `trading-ai` side; V0-A APPROVED (Codex CLEAN); V0-B (real drivers, verify/land split, recovery, limits, console, `assist` commands) next — needs operator authorization |
 | First project | `projects/trading-ai-engine/` registered (migrated from the legacy `targets/trading-ai.yaml`, now deleted) -> `c:\Repos\trading-ai`, branch `development`; gate `BLOCKED_UNTIL_T0`; no Phase 9 manifest exists, so no live lane is startable |
 | Schemas | Four v2 external contracts published (`schemas/v2/`: author-result, fold, review, target-gate-result); v1 drafts retained as fixtures under `schemas/v1/` |
 | Suite | 307 tests passing locally (`python -m pytest -q --tb=short`, 2026-09-01); pyflakes clean; fakes only — no CLI, network, or target repo |
 
-## V0-A slice contents (awaiting review)
+## V0-A slice contents (approved — Codex CLEAN, 2026-09-01)
 
 - Project Control Plane: `projects/INDEX.md`, `registry.yaml`,
   `trading-ai-engine/` (INDEX, project.yaml, work-index, agent/skill packages,
@@ -29,19 +29,11 @@
 
 ## Review requests outstanding
 
-- **Codex:** re-review the V0-A slice `103020f..<tip>` against
-  `manifests/v0a_walking_skeleton.yaml`. Rev 5 folds the round-4 review:
-  R1-02 — the guidance-only structural branch is complete: `lens: guidance`
-  also forbids `security`, `open_decisions`, and `dependencies_added`
-  (schema + semantic rejection, unit + E2E retry→STOP regressions); no
-  review-only field can be accepted-and-discarded; R1-05 — the coordinator's
-  complete lane-identity preflight is one shared `resolve_lane_binding`
-  (safe lane id, project binding, full-SHA scope base, declared work item,
-  REGISTERED manifest, registered policy, review kind) used verbatim by
-  `replay_context`, and replay binds EVERY ledger entry's `lane_id` to the
-  immutable identity; both round-4 rechained counterexamples (foreign
-  manifest across LANE_OPENED + artifacts; foreign per-entry lane_id) are
-  regressions.
+- **V0-A review complete:** Codex verdict CLEAN on
+  `103020f..9da984bf59b219f329f72e18e944aa1acb181ab0` (round 5; all twelve
+  findings across four rounds VERIFIED_RESOLVED). The post-convergence
+  bookkeeping commit recording the verdict (this manifest/STATUS update) is
+  docs-only and sits outside the reviewed range.
 - Still pending from before: final Codex review of the rev-3 design fold, and
   the `trading-ai` branch `process/orchestrator-pointer-dev-ruling`.
 

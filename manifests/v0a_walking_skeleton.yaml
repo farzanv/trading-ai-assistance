@@ -11,11 +11,11 @@ owner: claude
 reviewer: codex
 scope_base: "103020f640e6ccfab2347ccab7018fa0b43a6bc2"
 status: >-
-  REV 5 DELIVERED 2026-09-01 — Codex round-4 review folded (R1-02
-  guidance-only branch completed for security/open_decisions/
-  dependencies_added; R1-05 shared coordinator/replay preflight incl.
-  registered manifest + per-entry lane_id binding); awaiting Codex
-  re-review.
+  CONVERGED 2026-09-01 — Codex verdict CLEAN on rev 5
+  (103020f..9da984bf59b219f329f72e18e944aa1acb181ab0) after five review
+  rounds; every finding VERIFIED_RESOLVED. The approval covers the V0-A
+  implementation slice only: T0 remains mandatory before any live Assist
+  lane, and V0-B functionality and live execution remain unapproved.
   Fake drivers only: no real claude/codex invocation, no live target
   execution, no landing, no push, no DB/provider access, no limit handling,
   no external notifications. T0 (the target RVA JSON contract) remains a
@@ -55,6 +55,15 @@ review_rounds:
       STILL_PRESENT: [V0A-R1-02, V0A-R1-05]
     findings: []
     folded_in: rev 5 (both FOLDED)
+  - round: 5
+    reviewer: codex
+    verdict: CLEAN
+    reviewed_tip: "9da984bf59b219f329f72e18e944aa1acb181ab0"
+    prior_reconciliation:
+      VERIFIED_RESOLVED: [V0A-R1-01, V0A-R1-02, V0A-R1-03, V0A-R1-04, V0A-R1-05,
+                          V0A-R1-06, V0A-R1-07, V0A-R1-08, V0A-R2-01, V0A-R2-02,
+                          V0A-R2-03, V0A-R3-01]
+    findings: []
 
 objective: >-
   The smallest complete deterministic loop, replayable from its own ledger:
