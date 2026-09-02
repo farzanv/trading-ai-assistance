@@ -1,0 +1,16 @@
+# Console/status monitoring policy (design §5.6/§10). Console output plus
+# `assist status`/`assist watch` are the only V1 transports; no email, webhook,
+# or desktop notification. Enforcement is V0-B scope.
+
+schema_version: 1
+
+console_events:
+  - pause_detected
+  - scheduled_check_still_blocked
+  - immediate_retry_requested
+  - limit_or_outage_cleared
+  - work_resumed
+  - resume_failed
+  - wait_operator
+  - stopped
+  - completed

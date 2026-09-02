@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v2/fold.schema.json",
+  "title": "fold/v2 — author output after a repair round: exact disposition of every outstanding blocking finding (architecture §7.1-§7.3, protocol §4)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "commit", "revision", "tree_digest", "folded_review_range", "dispositions", "author"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "the new revision's full commit; must descend from the lane base with no foreign commits" },
+    "revision": { "type": "integer", "minimum": 2 },
+    "tree_digest": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "git tree object id of the new commit" },
+    "folded_review_range": { "type": "string", "pattern": "^[0-9a-f]{40}\\.\\.[0-9a-f]{40}$", "description": "the review/v2 reviewed_range this fold answers" },
+    "dispositions": {
+      "type": "array",
+      "description": "exactly one entry per outstanding blocking finding (exact-set reconciliation; no omission, duplication, or unknown ID)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_id", "disposition"],
+        "properties": {
+          "finding_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+          "disposition": { "type": "string", "enum": ["FOLDED", "REJECTED_WITH_REASON", "BLOCKED_NEEDS_TECHNICAL_GUIDANCE", "UNKNOWN_CONTRACT", "REQUIRES_SCOPE_EXPANSION", "REQUIRES_OPERATOR_ACTION"] },
+          "root_cause": { "type": "string", "description": "the verified root cause repaired (required for FOLDED)" },
+          "changed_files": { "type": "array", "items": { "type": "string" } },
+          "change_summary": { "type": "string" },
+          "tests": {
+            "type": "array",
+            "description": "test evidence for the repair (protocol §10.1)",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["test_id", "post_fix_result"],
+              "properties": {
+                "test_id": { "type": "string" },
+                "behavior_proved": { "type": "string" },
+                "validation_kind": { "type": "string", "enum": ["unit", "integration", "database", "concurrency", "provider_capture", "property", "static_proof"] },
+                "pre_fix_result": { "type": "string" },
+                "post_fix_result": { "type": "string" },
+                "already_passing_explanation": { "type": "string" }
+              }
+            }
+          },
+          "reason": { "type": "string", "description": "required for every non-FOLDED disposition; rejections must cite code, tests, or governing contracts" },
+          "guidance_deviation": { "type": "string", "description": "any justified difference from the reviewer's guidance" },
+          "record_ref": { "type": "string", "description": "where the fold is recorded, e.g. \"§11.4 item 2\"" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "disposition": { "const": "FOLDED" } } },
+            "then": { "required": ["root_cause", "changed_files"] },
+            "else": { "required": ["reason"] }
+          }
+        ]
+      }
+    },
+    "unknown_contracts": {
+      "type": "array",
+      "description": "provider/API questions neither agent can answer from pinned docs or captures — each is a STOP packaged for the operator",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider", "endpoint", "question", "consulted", "would_settle"],
+        "properties": {
+          "provider": { "type": "string" },
+          "endpoint": { "type": "string" },
+          "question": { "type": "string" },
+          "consulted": { "type": "array", "items": { "type": "string" } },
+          "would_settle": { "type": "string" }
+        }
+      }
+    },
+    "dependencies_added": { "type": "array", "items": { "type": "string" } },
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "type": "string", "enum": ["claude", "codex"] },
+        "model": { "type": "string" },
+        "effort": { "type": "string" },
+        "session_id": { "type": "string" },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 },
+            "cache_read": { "type": "integer", "minimum": 0 },
+            "cache_write": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

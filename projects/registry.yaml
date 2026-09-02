@@ -1,0 +1,6 @@
+# Project registry — deterministic discovery only; no runtime status here.
+# Design authority: docs/design/PROJECT_CONTROL_PLANE.md §4.
+schema_version: 1
+projects:
+  trading-ai-engine:
+    config: trading-ai-engine/project.yaml

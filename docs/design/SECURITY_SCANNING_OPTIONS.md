@@ -1,9 +1,14 @@
 # Security scanning — options for phase 2 (OPEN, for Codex + operator)
 
-**Status:** PHASE 2, not decided (operator, 2026-08-29). The orchestrator loop carries no
+**Status:** LATER SECURITY PHASE, not V1 (operator, clarified 2026-08-31). The orchestrator loop carries no
 dependency gate and no scanner (design §7); library vetting and vulnerability scanning happen
 *outside* the loop. This note records the options and the analysis so the choice can be
 made with Codex's input. Nothing here is implemented.
+
+Any later scanner selection is recorded per registered project under
+`projects/<project>/policies/`; it is never hard-coded for `trading-ai`. Scan output and
+status remain project-local. Shared scanner adapters may be reused explicitly, but Engine
+and UI can select different dependency ecosystems and commands without sharing state.
 
 ## The concern
 
@@ -47,8 +52,8 @@ be exact. Recommended regardless of the scanner choice.
   seconds; only advisory lookups leave the machine. Can run locally before push, on the
   Test server against its venv after each deploy, and on a schedule.
 - `gitleaks` (or `detect-secrets`) as a pre-push hook: secret scan on every push, no account
-  needed. (The orchestrator keeps its own secret scan as a hard STOP for slices it lands —
-  design §7.1; the hook covers hand-made commits.)
+  needed. V1 has no dedicated scanner; it instead limits persisted evidence to structured
+  artifacts plus bounded diagnostics and forbids environment/auth/credential capture.
 - Optional later: `bandit` for static security lint of changed files.
 - Limits: someone must run it (hooks + a scheduled task make that automatic); no central
   dashboard.
@@ -56,9 +61,10 @@ be exact. Recommended regardless of the scanner choice.
 ## Option C — hybrid (Claude's recommendation, 2026-08-29)
 
 1. Pin: lock file in `trading-ai` (small reviewed slice).
-2. Primary: local `pip-audit` + `gitleaks` pre-push hooks in both repos; `pip-audit` on Test
+2. Primary: local `pip-audit` + `gitleaks` pre-push hooks in each applicable Python repo;
+   `pip-audit` on Test
    after each deploy as an operator command.
-3. Backstop: Dependabot alerts enabled on both GitHub repos for continuous re-checking
+3. Backstop: Dependabot alerts enabled on each applicable GitHub repo for continuous re-checking
    between local runs.
 
 Rationale: B answers the "check the real installation, again and again" concern exactly;
@@ -70,8 +76,8 @@ A costs nothing and covers the gap between local runs; the lock file makes both 
    `trading-ai` as its own reviewed slice (with the Test deploy runbook switching to
    `requirements.lock`)?
 2. Is a pre-push hook the right enforcement point for `pip-audit`/`gitleaks`, or should
-   the orchestrator run them post-landing as *informational* (never a gate) and surface
-   results in the Human Gate Brief?
+   a later security subsystem run them post-landing as informational evidence? This is
+   explicitly not a V1 orchestrator dependency.
 3. Any objection to Dependabot on private repos given the repos' contents (no secrets are
    committed; `.env` is gitignored in both)?
 4. Anything in this analysis that is wrong for the Windows/Linux-Test split?

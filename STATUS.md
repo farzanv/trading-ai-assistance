@@ -1,38 +1,55 @@
 # STATUS — trading-ai-assistance
 
-**Updated:** 2026-08-29
+**Updated:** 2026-09-01
 
 | Item | State |
 |---|---|
-| Repository | scaffolded 2026-08-29 (this commit); no orchestrator code yet |
-| Design | `docs/design/ORCHESTRATED_EXECUTION_DESIGN.md` rev 1 — PROPOSED, operator rulings folded (Mode A; Dev RW; no dependency gate; own repo); awaiting Codex review |
-| Build plan | M0 in progress (repo created; Codex CLI not yet installed; schemas drafted, unreviewed) |
-| First target | `trading-ai` (`c:\Repos\trading-ai`, branch `development`); first live lane planned = CA design Phase 9 under Mode B while the operator watches (M1) |
-| Suite | 0 tests |
+| Repository | V0-A walking skeleton CONVERGED 2026-09-01 — Codex verdict CLEAN on rev 5 (`103020f..9da984b`, five review rounds, all findings VERIFIED_RESOLVED). Approval covers the V0-A slice only; V0-B and live execution unapproved |
+| Design | Governing design rev 3 (`103020f`, operator-approved architecture baseline for implementation) plus Python architecture, Project Control Plane, and review/repair protocol |
+| Build plan | T0 (target RVA JSON contract) still outstanding on the `trading-ai` side; V0-A APPROVED (Codex CLEAN); V0-B (real drivers, verify/land split, recovery, limits, console, `assist` commands) next — needs operator authorization |
+| First project | `projects/trading-ai-engine/` registered (migrated from the legacy `targets/trading-ai.yaml`, now deleted) -> `c:\Repos\trading-ai`, branch `development`; gate `BLOCKED_UNTIL_T0`; no Phase 9 manifest exists, so no live lane is startable |
+| Schemas | Four v2 external contracts published (`schemas/v2/`: author-result, fold, review, target-gate-result); v1 drafts retained as fixtures under `schemas/v1/` |
+| Suite | 307 tests passing locally (`python -m pytest -q --tb=short`, 2026-09-01); pyflakes clean; fakes only — no CLI, network, or target repo |
+
+## V0-A slice contents (approved — Codex CLEAN, 2026-09-01)
+
+- Project Control Plane: `projects/INDEX.md`, `registry.yaml`,
+  `trading-ai-engine/` (INDEX, project.yaml, work-index, agent/skill packages,
+  lanes/limits/monitoring/persistence policies), `shared/policies/safety-v1.md`.
+- Deterministic core: `src/orchestrator/model.py` (frozen domain), `reducer.py`
+  (pure transitions, finding lifecycle, counters; unspecified pairs fail closed),
+  `artifacts.py` (v2 validation, exact-set reconciliation, persistence safety),
+  `ledger.py` (append-only digest-chained JSONL + replay), `project.py`
+  (containment + digests), `agents.py` (driver interfaces only),
+  `application.py` (coordinator shell; run ends at convergence — no landing).
+- Tests: reducer table incl. exhaustive fail-closed sweep, finding lifecycle
+  (guidance/handoff/rejection/adjudication/ping-pong), artifact reconciliation
+  and safety, ledger tamper/replay, project isolation, and the simulated
+  author → review → repair → no-code guidance → final review → convergence lane.
 
 ## Review requests outstanding
 
-- **Start with** `docs/HANDOFF_2026-08-29_ORCHESTRATOR_KICKOFF.md` (why, rulings, walkthrough, glossary).
-- **Codex:** review the scaffold (`manifests/repo_scaffold.yaml`), the DRAFT schemas, the
-  design rev 1, and answer the four questions in `docs/design/SECURITY_SCANNING_OPTIONS.md`
-  (security scanning = phase 2, approach undecided).
-- Also pending Codex review in `trading-ai`: branch `process/orchestrator-pointer-dev-ruling`
-  (CLAUDE.md Dev-RW amendment + design pointer; parked off `development`).
+- **V0-A review complete:** Codex verdict CLEAN on
+  `103020f..9da984bf59b219f329f72e18e944aa1acb181ab0` (round 5; all twelve
+  findings across four rounds VERIFIED_RESOLVED). The post-convergence
+  bookkeeping commit recording the verdict (this manifest/STATUS update) is
+  docs-only and sits outside the reviewed range.
+- Still pending from before: final Codex review of the rev-3 design fold, and
+  the `trading-ai` branch `process/orchestrator-pointer-dev-ruling`.
 
 ## Open decisions (design §10)
 
-`max_rounds` and budgets · P2-on-design-docs rule · landing policy · ownership of M0–M3 ·
-template-database relocation (`trading-ai` side) · whether this repo gets push-time scanning.
+ownership of T0/V0-B/V0-C/V1 · template-database relocation (`trading-ai` side).
+Everything ruled through 2026-08-31 stands (see design §10 and CLAUDE.md).
 
 ## Prerequisites outstanding (design §8)
 
-1. Codex CLI (`codex exec`) installed and smoke-tested in a read-only sandbox; confirm
-   `-m` and the `model_reasoning_effort` override, exit codes, and the exact usage-limit
-   surface (design §5.5/§5.6 — pinned into `targets/trading-ai.yaml` `limit_signals`).
-2. `claude -p` headless smoke run with `--resume`, `--model`, `--effort`,
-   `--max-budget-usd`, a restricted tool allowlist, and capture of the `system/api_retry`
-   stream event + the hourly/weekly usage-limit message text.
-3. `review.json` / `fold.json` obligations added to `trading-ai`'s `AGENTS.md` + `CLAUDE.md`
-   (a `trading-ai` process slice).
-4. `trading-ai` collaboration contract §1.2 amendment (operator).
-5. `trading_ai_agent` login on Dev; provider env file for implementation lanes.
+1. `trading-ai` delivers the versioned RVA JSON result (T0) — blocking for any live lane.
+2. Codex CLI exact-child auth/smoke evidence (schema, sandbox, resume, exit codes,
+   usage-limit surface → pin into `projects/trading-ai-engine/policies/limits.yaml`).
+3. `claude -p` headless smoke run (`--resume`, `--model`, `--effort`, tool allowlist,
+   `system/api_retry` + usage-limit text capture).
+4. v2 contract obligations added to `trading-ai`'s `AGENTS.md`/`CLAUDE.md`
+   (a `trading-ai` process slice); v2 schemas here are published but unreviewed.
+5. `trading-ai` collaboration contract §1.2 amendment (operator).
+6. `trading_ai_agent` login on Dev; provider env file for implementation lanes.

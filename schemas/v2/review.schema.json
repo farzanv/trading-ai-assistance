@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v2/review.schema.json",
+  "title": "review/v2 — reviewer output: gating review, no-code guidance, or non-gating advisory (architecture §7.1-§7.2, protocol §5-§6, §11.1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "reviewed_range", "tree_digest", "manifest", "review_kind", "lens", "verdict", "findings", "prior_findings", "scope_observations", "reviewer"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "reviewed_range": { "type": "string", "pattern": "^[0-9a-f]{40}\\.\\.[0-9a-f]{40}$", "description": "scope_base..reviewed SHA, both full" },
+    "tree_digest": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "git tree object id of the reviewed SHA; landing requires equality" },
+    "manifest": { "type": "string", "description": "target-repo-relative manifest path" },
+    "review_kind": { "type": "string", "enum": ["design", "code", "security", "bookkeeping"] },
+    "lens": { "type": "string", "enum": ["gating", "guidance", "advisory"], "description": "only gating may supply CLEAN; guidance carries no code; advisory can never gate" },
+    "verdict": { "type": "string", "enum": ["CLEAN", "FINDINGS"], "description": "CLEAN = no P0/P1/P2 and every historical blocker resolved" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "section", "title", "description", "required_change", "requires_ruling", "earlier_phase_gap", "blocks_downstream", "unknown_contract"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "stable for the life of the lane; reused when reopened" },
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "section": { "type": "string" },
+          "file": { "type": "string" },
+          "title": { "type": "string", "maxLength": 200 },
+          "description": { "type": "string" },
+          "root_cause": { "type": "string" },
+          "consequence": { "type": "string", "description": "operational or correctness consequence" },
+          "required_change": { "type": "string", "description": "the required outcome" },
+          "recommended_approach": { "type": "string" },
+          "invariants": { "type": "array", "items": { "type": "string" } },
+          "closure_evidence": { "type": "string", "description": "tests and evidence required for closure" },
+          "counterexample": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["missed_because", "inputs", "expected", "actual", "permanent_test_shape"],
+            "description": "non-executed counterexample for a testable missed defect (protocol §10.4); never executed by the orchestrator",
+            "properties": {
+              "missed_because": { "type": "string" },
+              "inputs": { "type": "string" },
+              "expected": { "type": "string" },
+              "actual": { "type": "string" },
+              "governing_requirement": { "type": "string" },
+              "permanent_test_shape": { "type": "string" }
+            }
+          },
+          "requires_ruling": { "type": "boolean" },
+          "earlier_phase_gap": { "type": ["string", "null"], "description": "e.g. \"phase7:§3.3\" — STOP; earlier phase amended first" },
+          "blocks_downstream": { "type": "boolean" },
+          "unknown_contract": { "type": "boolean", "description": "provider/API contract not established — guessing prohibited" }
+        },
+        "if": { "properties": { "severity": { "enum": ["P0", "P1", "P2"] } } },
+        "then": { "required": ["root_cause", "consequence", "recommended_approach", "closure_evidence"] }
+      }
+    },
+    "prior_findings": {
+      "type": "array",
+      "description": "explicit assessment of EVERY historical blocking finding (exact-set; architecture §7.3)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "outcome"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+          "outcome": { "type": "string", "enum": ["STILL_PRESENT", "VERIFIED_RESOLVED", "REOPENED", "REVIEWER_ACCEPTS_REJECTION", "REVIEWER_DISAGREES"] },
+          "note": { "type": "string" },
+          "closure_evidence": { "type": "string", "description": "what verified the resolution / why it is still present" }
+        }
+      }
+    },
+    "scope_observations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "foreign files, undeclared changes, interleaved commits — any entry is a STOP"
+    },
+    "security": {
+      "type": "object",
+      "description": "required for gating code reviews; each item PASS | FAIL | N/A with a note on FAIL",
+      "additionalProperties": false,
+      "required": ["parameterised_sql", "no_credential_logging", "least_privilege_db_objects", "job_robustness_contract", "provider_calls_bounded_documented", "dependencies_pinned_named", "no_dynamic_code_execution"],
+      "properties": {
+        "parameterised_sql": { "$ref": "#/$defs/check" },
+        "no_credential_logging": { "$ref": "#/$defs/check" },
+        "least_privilege_db_objects": { "$ref": "#/$defs/check" },
+        "job_robustness_contract": { "$ref": "#/$defs/check" },
+        "provider_calls_bounded_documented": { "$ref": "#/$defs/check" },
+        "dependencies_pinned_named": { "$ref": "#/$defs/check" },
+        "no_dynamic_code_execution": { "$ref": "#/$defs/check" }
+      }
+    },
+    "dependencies_added": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "new/changed pinned requirements — informational, surfaced in the Human Gate Brief, never a gate"
+    },
+    "guidance": {
+      "type": "object",
+      "description": "required for lens=guidance; explains the failed repair WITHOUT any patch or replacement code (protocol §6)",
+      "additionalProperties": false,
+      "required": ["finding_ids", "why_failed", "recommended_repair", "steps", "invariants", "required_tests"],
+      "properties": {
+        "finding_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "why_failed": { "type": "string" },
+        "recommended_repair": { "type": "string", "description": "concrete approach in prose; may name functions/interfaces/contracts, never code for direct integration" },
+        "steps": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "affected_components": { "type": "array", "items": { "type": "string" } },
+        "invariants": { "type": "array", "items": { "type": "string" } },
+        "required_tests": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "unsafe_alternatives": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "description": "cross-lane provenance when reviewing a handoff lane (protocol §7)",
+      "additionalProperties": false,
+      "required": ["stopped_lane_tip", "transferred_finding_ids"],
+      "properties": {
+        "stopped_lane_tip": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "transferred_finding_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+      }
+    },
+    "open_decisions": {
+      "type": "array",
+      "description": "design reviews: the doc's open decisions for the operator",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "summary"],
+        "properties": {
+          "ref": { "type": "string" },
+          "summary": { "type": "string" },
+          "blocks_downstream": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "type": "string", "enum": ["codex", "claude"] },
+        "model": { "type": "string" },
+        "effort": { "type": "string" },
+        "tokens": { "$ref": "#/$defs/tokens" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "advisory/guidance output can never supply CLEAN (protocol §7)",
+      "if": { "properties": { "lens": { "enum": ["guidance", "advisory"] } } },
+      "then": { "properties": { "verdict": { "const": "FINDINGS" } } }
+    },
+    {
+      "$comment": "CLEAN prohibits open blockers: no P0-P2 finding and no unresolved historical outcome (architecture §7.2)",
+      "if": { "properties": { "verdict": { "const": "CLEAN" } } },
+      "then": {
+        "properties": {
+          "findings": { "items": { "properties": { "severity": { "const": "P3" } } } },
+          "prior_findings": { "items": { "properties": { "outcome": { "enum": ["VERIFIED_RESOLVED", "REVIEWER_ACCEPTS_REJECTION"] } } } }
+        }
+      }
+    },
+    {
+      "$comment": "guidance is guidance-only: no findings, prior reconciliation, scope observations, security checklist, open decisions, or dependency declarations — review-only and stop-bearing content must arrive through a gating review (protocol §6)",
+      "if": { "properties": { "lens": { "const": "guidance" } } },
+      "then": {
+        "required": ["guidance"],
+        "properties": {
+          "findings": { "maxItems": 0 },
+          "prior_findings": { "maxItems": 0 },
+          "scope_observations": { "maxItems": 0 },
+          "open_decisions": { "maxItems": 0 },
+          "dependencies_added": { "maxItems": 0 },
+          "security": { "not": {} }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "review_kind": { "const": "code" }, "lens": { "const": "gating" } } },
+      "then": { "required": ["security"] }
+    }
+  ],
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["PASS", "FAIL", "N/A"] },
+        "note": { "type": "string" },
+        "finding_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "required on FAIL: the blocking finding in this review that represents this checklist defect" }
+      },
+      "if": { "properties": { "result": { "const": "FAIL" } } },
+      "then": { "required": ["finding_id", "note"] }
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "cache_read": { "type": "integer", "minimum": 0 },
+        "cache_write": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

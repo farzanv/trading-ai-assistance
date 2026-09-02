@@ -1,0 +1,81 @@
+# trading-ai-engine project configuration (Project Control Plane §4).
+# Migrated in V0-A from the legacy targets/trading-ai.yaml proposal.
+# Paths under agents/skills/policies resolve relative to this file and must stay
+# inside this project folder or the repository's shared/ root. No secret belongs
+# in this file.
+
+schema_version: 1
+project_id: trading-ai-engine
+display_name: Trading AI Engine
+
+repository:
+  path: "c:/Repos/trading-ai"
+  integration_branch: development
+  remote: origin
+  manifest_root: dil-engine/manifests
+
+gate:
+  cwd: dil-engine
+  command: [python, scripts/verify_release.py, --manifest, "{manifest}", --sha, "{sha}", --phase, static, --json]
+  contract_status: BLOCKED_UNTIL_T0
+  result_schema: target-gate-result/v2
+  # The current target script does not support --json. No Assist lane may run
+  # until T0 delivers the reviewed stable category + checks + range result.
+
+context:
+  project_index: INDEX.md
+
+# Files the agents are bound by inside the target repository.
+agent_rules:
+  - CLAUDE.md
+  - AGENTS.md
+  - dil-engine/docs/process/COLLABORATION_CONTRACT.md
+  - dil-engine/docs/process/DECISIONS.md
+
+# Human-gate surfaces (design §3.3 items 3-4): a diff touching these forces a
+# human gate. Supplied here as project policy, never hard-coded in source.
+human_gate_surfaces:
+  migrations:
+    - "dil-engine/docs/operations/sql/migrations/**"
+  deployment:
+    - "dil-engine/scripts/run_*.sh"
+    - "dil-engine/scripts/install_env_runtime.sh"
+    - "dil-engine/ops/**"
+
+conventions:
+  round_record_section: "## 11. Review round record"
+  commit_message_fold: "CA Phase {phase} rev {rev}: fold Codex rev-{prev} review ({p1} P1 + {p2} P2) - {summary}"
+  commit_message_approval: "{item}: record formal approval (operator + Codex, {date})"
+
+execution:
+  mode: single_phase
+  local_land_exact_clean_tree: true
+  auto_push: false                 # V0; enable only after the rev-3 graduation gate
+  stop_after_phase_land: true
+  bookkeeping: separate_operator_started_run
+  manifest_preparation: separate_authorized_claude_slice
+  integration_tip_check: before_every_agent_verify_and_land
+
+agents:
+  author: agents/claude-author-v1.md
+  repair: agents/claude-repair-v1.md
+  reviewer: agents/codex-reviewer-v1.md
+
+skills:
+  design: skills/design-v1.md
+  implementation: skills/implementation-v1.md
+  bookkeeping: skills/bookkeeping-v1.md
+
+policies:
+  lanes: policies/lanes.yaml
+  limits: policies/limits.yaml
+  monitoring: policies/monitoring.yaml
+  persistence: policies/persistence.yaml
+  # Every project explicitly binds the shared safety package (PCP §6).
+  safety: ../../shared/policies/safety-v1.md
+
+schemas:
+  author_result: author-result/v2
+  fold: fold/v2
+  review: review/v2
+  target_gate_result: target-gate-result/v2

@@ -1,0 +1,11 @@
+# Persistence-safety policy (design §5.7, §7.1): schema-defined structured
+# artifacts only; no raw transcripts, environment dumps, auth files, tokens, or
+# credentials; diagnostics bounded per invocation.
+
+schema_version: 1
+
+structured_retention: indefinite_local
+persist_full_raw_transcripts: false
+diagnostic_max_bytes_per_invocation: 1048576
+forbidden_sources: [environment_dump, auth_file, cli_auth_cache, token, credential]
+automatic_purge: false

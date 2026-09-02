@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v1/fold.schema.json",
+  "title": "DRAFT fold.json — structured author output after folding a review round (design §5.2)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "commit", "revision", "folded_review_range", "dispositions", "author"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$", "description": "the new revision's commit; must descend from the lane base with no foreign commits" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "folded_review_range": { "type": "string", "pattern": "^[0-9a-f]{7,40}\\.\\.[0-9a-f]{7,40}$", "description": "the review.json reviewed_range this fold answers" },
+    "dispositions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_id", "disposition"],
+        "properties": {
+          "finding_id": { "type": "string" },
+          "disposition": { "type": "string", "enum": ["FOLDED", "REJECTED_WITH_REASON", "UNKNOWN_CONTRACT"] },
+          "reason": { "type": "string", "description": "required for REJECTED_WITH_REASON and UNKNOWN_CONTRACT" },
+          "record_ref": { "type": "string", "description": "where the fold is recorded, e.g. \"§11.4 item 2\"" }
+        },
+        "if": { "properties": { "disposition": { "enum": ["REJECTED_WITH_REASON", "UNKNOWN_CONTRACT"] } } },
+        "then": { "required": ["reason"] }
+      }
+    },
+    "unknown_contracts": {
+      "type": "array",
+      "description": "provider/API questions neither agent can answer from pinned docs or captures — each is a STOP packaged for the operator",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider", "endpoint", "question", "consulted", "would_settle"],
+        "properties": {
+          "provider": { "type": "string" },
+          "endpoint": { "type": "string" },
+          "question": { "type": "string" },
+          "consulted": { "type": "array", "items": { "type": "string" } },
+          "would_settle": { "type": "string" }
+        }
+      }
+    },
+    "dependencies_added": { "type": "array", "items": { "type": "string" } },
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "type": "string", "enum": ["claude", "codex"] },
+        "model": { "type": "string" },
+        "session_id": { "type": "string" },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 },
+            "cache_read": { "type": "integer", "minimum": 0 },
+            "cache_write": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

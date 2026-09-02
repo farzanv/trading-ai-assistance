@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v2/target-gate-result.schema.json",
+  "title": "target-gate-result/v2 — the target RVA's machine-readable gate result (architecture §5.4, §7.1; design §8.1 / T0)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "verdict", "category", "resolved_range", "manifest", "tree_digest", "checks"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL"], "description": "the governing verdict; must be consistent with the category" },
+    "category": {
+      "type": "string",
+      "enum": ["PASS", "DOCS_INCONCLUSIVE_SCOPE_PASS", "FIXABLE_TEST", "FIXABLE_LINT", "FIXABLE_STATIC_CHECK", "SCOPE", "BASE", "DEPENDENCY", "FOREIGN_COMMIT", "UNKNOWN"],
+      "description": "stable routing category; the orchestrator never upgrades an exit code or parses prose"
+    },
+    "resolved_range": { "type": "string", "pattern": "^[0-9a-f]{40}\\.\\.[0-9a-f]{40}$", "description": "the exact base..sha the gate judged, both full" },
+    "manifest": { "type": "string", "description": "target-repo-relative manifest path the gate ran against" },
+    "tree_digest": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "git tree object id of the judged SHA" },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "result"],
+        "properties": {
+          "name": { "type": "string" },
+          "result": { "type": "string", "enum": ["PASS", "FAIL", "SKIPPED"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "evidence_digests": {
+      "type": "object",
+      "description": "sha256 digests of the evidence files the gate produced",
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "gate_version": { "type": "string", "description": "version of the target gate implementation that produced this result" }
+  },
+  "allOf": [
+    {
+      "$comment": "verdict PASS if and only if the category is an accepting one",
+      "if": { "properties": { "category": { "enum": ["PASS", "DOCS_INCONCLUSIVE_SCOPE_PASS"] } } },
+      "then": { "properties": { "verdict": { "const": "PASS" } } },
+      "else": { "properties": { "verdict": { "const": "FAIL" } } }
+    }
+  ]
+}

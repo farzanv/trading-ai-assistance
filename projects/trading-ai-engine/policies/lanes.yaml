@@ -1,0 +1,77 @@
+# Lane policy: model/effort per role per lane kind (design §5.5), bounds, and
+# the cross-lane handoff contract. Migrated from targets/trading-ai.yaml.
+# A lane manifest may override for that lane only; a change never applies to a
+# running lane. The reviewer's model/effort is never lower than the author's
+# for the same lane kind.
+
+schema_version: 1
+
+lanes:
+  design:
+    author:   { agent: claude, model: claude-fable-5, effort: high, max_turns: 200 }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
+    author_tools: [edit, git, pytest, pyflakes]      # no MCP DB, no provider MCP, no web
+    reviewer_sandbox: read-only
+    accepted_gate_categories: [DOCS_INCONCLUSIVE_SCOPE_PASS, PASS]
+    max_rounds: 10
+    max_agent_invocations: 40
+  implementation:
+    author:   { agent: claude, model: claude-fable-5, effort: high, max_turns: 400 }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: high }
+    author_tools: [edit, git, pytest, pyflakes, dev-db, provider-env]   # dev-db = trading_ai_v4 RW (ruling 2026-08-29)
+    reviewer_sandbox: read-only
+    reviewer_tools: [dev-db-readonly]
+    accepted_gate_categories: [PASS]
+    max_rounds: 10
+    max_agent_invocations: 40
+  bookkeeping:
+    author:   { agent: claude, model: claude-sonnet-5, effort: medium, max_turns: 40 }
+    reviewer: { agent: codex,  model: gpt-5.6-sol,    effort: medium }
+    author_tools: [edit, git]
+    reviewer_sandbox: read-only
+    accepted_gate_categories: [DOCS_INCONCLUSIVE_SCOPE_PASS, PASS]
+    max_rounds: 2
+    max_agent_invocations: 10
+
+# Agent CLI surfaces (flag presence locally verified; exact-child auth/schema/
+# sandbox/limit behavior remains a V0-B smoke prerequisite).
+agent_clis:
+  claude:
+    cli: claude
+    model_flag: "--model"
+    effort_flag: "--effort"           # low | medium | high | xhigh | max
+    turns_flag: "--max-turns"
+  codex:
+    cli: codex
+    model_flag: "-m"
+    effort_override: "-c model_reasoning_effort={effort}"
+    sandbox_args: ["-s", "read-only"]
+    output_schema_flag: "--output-schema"
+
+handoff:
+  trigger: guided_repair_still_present
+  mode: new_dependent_lane
+  owner: codex
+  reviewer: claude
+  manifest_preparation: separate_claude_authored_codex_reviewed_slice
+  scope_base: accepted_handoff_manifest_preparation_commit
+  records_stopped_lane_tip: true
+  one_way: true
+  codex_self_review_lens: advisory
+  advisory_can_gate: false
+
+privilege_boundary:
+  verify_process:
+    push_capability: false
+    integration_checkout_write: false
+    network: manifest_grant_only
+    database: manifest_grant_only
+  land_process:
+    run_target_code: false
+    hooks_path: orchestrator_owned_empty_directory
+    inspect_hook_changes: true
+    remote_push: false
+  auto_push_graduation:
+    require_child_push_denial_test: true
+    require_land_process_no_target_code_test: true
+    watched_surprise_free_lanes: 3

@@ -1,4 +1,8 @@
-"""The published schemas must be valid JSON Schema and reject the obvious malformed shapes."""
+"""The retained v1 draft schemas stay valid and reject the obvious malformed shapes.
+
+v1 is draft test data only and cannot govern a lane (architecture §7.2); the
+published V0 contracts are the v2 schemas covered by test_schemas_v2.py.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
-SCHEMAS = Path(__file__).resolve().parents[1] / "schemas"
+SCHEMAS = Path(__file__).resolve().parents[1] / "schemas" / "v1"
 
 
 def _load(name: str) -> dict:

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/farzanv/trading-ai-assistance/schemas/v1/review.schema.json",
-  "title": "review.json — structured reviewer output (design §5.1, §7.1)",
+  "title": "DRAFT review.json — structured reviewer output (design §5.1, §7.1)",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "reviewed_range", "tree_digest", "manifest", "verdict", "findings", "scope_observations", "reviewer"],

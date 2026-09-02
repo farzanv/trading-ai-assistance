@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "project_id": "trading-ai-engine",
+  "work_items": [
+    {
+      "id": "ca_platform_design_phase9",
+      "kind": "design",
+      "manifest": "ca_platform_design_phase9.yaml",
+      "depends_on": ["ca_platform_design_phase8"]
+    }
+  ]
+}
