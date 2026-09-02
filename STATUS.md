@@ -4,12 +4,12 @@
 
 | Item | State |
 |---|---|
-| Repository | V0-A walking skeleton rev 4 DELIVERED 2026-09-01 (manifest `manifests/v0a_walking_skeleton.yaml`) — Codex round-3 review folded (R1-02 reopened→structural fix, R1-05/06 completed, R3-01 folded); awaiting Codex re-review |
+| Repository | V0-A walking skeleton rev 5 DELIVERED 2026-09-01 (manifest `manifests/v0a_walking_skeleton.yaml`) — Codex round-4 review folded (R1-02 and R1-05 completion gaps closed); awaiting Codex re-review |
 | Design | Governing design rev 3 (`103020f`, operator-approved architecture baseline for implementation) plus Python architecture, Project Control Plane, and review/repair protocol |
 | Build plan | T0 (target RVA JSON contract) still outstanding on the `trading-ai` side; V0-A done pending review; V0-B (real drivers, verify/land split, recovery, limits, console, `assist` commands) next |
 | First project | `projects/trading-ai-engine/` registered (migrated from the legacy `targets/trading-ai.yaml`, now deleted) -> `c:\Repos\trading-ai`, branch `development`; gate `BLOCKED_UNTIL_T0`; no Phase 9 manifest exists, so no live lane is startable |
 | Schemas | Four v2 external contracts published (`schemas/v2/`: author-result, fold, review, target-gate-result); v1 drafts retained as fixtures under `schemas/v1/` |
-| Suite | 297 tests passing locally (`python -m pytest -q --tb=short`, 2026-09-01); pyflakes clean; fakes only — no CLI, network, or target repo |
+| Suite | 307 tests passing locally (`python -m pytest -q --tb=short`, 2026-09-01); pyflakes clean; fakes only — no CLI, network, or target repo |
 
 ## V0-A slice contents (awaiting review)
 
@@ -30,20 +30,18 @@
 ## Review requests outstanding
 
 - **Codex:** re-review the V0-A slice `103020f..<tip>` against
-  `manifests/v0a_walking_skeleton.yaml`. Rev 4 folds the round-3 review:
-  R1-02 (reopened) — guidance artifacts are structurally guidance-only
-  (schema `maxItems: 0` for findings/prior_findings/scope_observations under
-  `lens: guidance`, plus semantic rejection); stop-bearing content can never
-  be accepted-and-discarded; R1-05 — `LaneIdentity` carries `project_id`,
-  and replay takes one mandatory `ReplayContext` resolved from the registered
-  `ProjectConfig` (project, run, identity, policy, schemas, package/config/
-  work-index digests — nothing optional); R1-06 — every effect payload
-  (INVOCATION_PLANNED, ARTIFACT_ACCEPTED/REJECTED with exact key sets and
-  invocation/path binding, RUN_END) is reconstructed in full from the
-  replayed command/snapshot/context and compared for exact equality;
-  R3-01 — lane-policy bounds must be genuine integers within the hard
-  ceilings (10 rounds / 40 invocations); booleans, floats, numeric strings,
-  and looser bounds are rejected at project load.
+  `manifests/v0a_walking_skeleton.yaml`. Rev 5 folds the round-4 review:
+  R1-02 — the guidance-only structural branch is complete: `lens: guidance`
+  also forbids `security`, `open_decisions`, and `dependencies_added`
+  (schema + semantic rejection, unit + E2E retry→STOP regressions); no
+  review-only field can be accepted-and-discarded; R1-05 — the coordinator's
+  complete lane-identity preflight is one shared `resolve_lane_binding`
+  (safe lane id, project binding, full-SHA scope base, declared work item,
+  REGISTERED manifest, registered policy, review kind) used verbatim by
+  `replay_context`, and replay binds EVERY ledger entry's `lane_id` to the
+  immutable identity; both round-4 rechained counterexamples (foreign
+  manifest across LANE_OPENED + artifacts; foreign per-entry lane_id) are
+  regressions.
 - Still pending from before: final Codex review of the rev-3 design fold, and
   the `trading-ai` branch `process/orchestrator-pointer-dev-ruling`.
 

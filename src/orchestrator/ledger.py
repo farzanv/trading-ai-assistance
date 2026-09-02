@@ -61,7 +61,12 @@ from orchestrator.model import (
     policy_digest,
     snapshot_to_dict,
 )
-from orchestrator.project import ProjectConfig, validate_identifier
+from orchestrator.project import (
+    ProjectConfig,
+    ProjectError,
+    resolve_lane_binding,
+    validate_identifier,
+)
 from orchestrator.reducer import reduce
 
 GENESIS_DIGEST = "0" * 64
@@ -175,21 +180,21 @@ def replay_context(
 ) -> ReplayContext:
     """Resolve the immutable replay context from the registered project.
 
-    The policy comes from the project's lane policy for the declared work-item
-    kind — the same resolution the coordinator uses — so a replay caller cannot
-    substitute a different policy or digest set than the Control Plane's.
+    Runs the SAME complete lane-identity preflight the coordinator runs
+    (resolve_lane_binding): safe lane identifier, project binding, full-SHA
+    scope base, declared work item, and the manifest registered for that work
+    item — so replay enforces every Control Plane identity invariant, and a
+    caller cannot substitute a policy, manifest, or digest set of its own.
     """
-    if identity.project_id != project.project_id:
-        raise LedgerReplayError(
-            f"identity project {identity.project_id!r} is not the resolved project "
-            f"{project.project_id!r}"
-        )
-    validate_identifier("run", run_id)
-    work_item = project.work_item(identity.work_item)
+    try:
+        policy, _review_kind = resolve_lane_binding(project, identity)
+        validate_identifier("run", run_id)
+    except ProjectError as exc:
+        raise LedgerReplayError(str(exc)) from None
     return ReplayContext(
         run_id=run_id,
         identity=identity,
-        policy=project.lane_policy(work_item.kind),
+        policy=policy,
         schemas=schemas,
         package_digests=project.package_digests,
         config_digest=project.config_digest,
@@ -579,6 +584,12 @@ def replay(
     saw_run_end = False
     decision_count = 0
     for entry in entries[1:]:
+        if entry.lane_id != identity.lane_id:
+            # Every entry — not only LANE_OPENED — is bound to the immutable
+            # lane identity; a rechained foreign lane_id never replays.
+            raise LedgerReplayError(
+                f"seq {entry.seq}: entry lane_id does not match the lane identity"
+            )
         if saw_run_end:
             raise LedgerReplayError(f"seq {entry.seq}: evidence after RUN_END")
         if entry.kind == KIND_EFFECT:

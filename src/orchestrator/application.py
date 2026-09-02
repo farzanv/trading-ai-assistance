@@ -17,7 +17,6 @@ V0-B scope.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,7 +61,6 @@ from orchestrator.model import (
     LaneSnapshot,
     Lens,
     OpenHumanGate,
-    REVIEW_KIND_FOR_LANE_KIND,
     RevisionVerified,
     Severity,
     VerifyRevision,
@@ -70,10 +68,8 @@ from orchestrator.model import (
     policy_digest,
     snapshot_to_dict,
 )
-from orchestrator.project import ProjectConfig, validate_identifier
+from orchestrator.project import ProjectConfig, ProjectError, resolve_lane_binding
 from orchestrator.reducer import reduce
-
-_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class CoordinatorError(Exception):
@@ -104,27 +100,13 @@ class LaneCoordinator:
         git: GitDriver,
         clock: Callable[[], str] = _utc_now,
     ) -> None:
-        validate_identifier("lane", identity.lane_id)
-        if identity.project_id != project.project_id:
-            raise CoordinatorError(
-                f"lane identity project {identity.project_id!r} is not the registered "
-                f"project {project.project_id!r}"
-            )
-        if not _FULL_SHA_RE.fullmatch(identity.scope_base):
-            raise CoordinatorError("scope_base must be a full 40-hex SHA")
-        work_item = project.work_item(identity.work_item)  # must be declared, never inferred
-        expected_manifest = f"{project.manifest_root}/{work_item.manifest}"
-        if identity.manifest != expected_manifest:
-            raise CoordinatorError(
-                f"manifest {identity.manifest!r} does not match the declared work item "
-                f"({expected_manifest!r})"
-            )
-        # The effective policy is resolved from the registered project for the
-        # declared work-item kind; callers cannot substitute one (PCP §3, §6).
-        policy = project.lane_policy(work_item.kind)
-        review_kind = REVIEW_KIND_FOR_LANE_KIND.get(work_item.kind)
-        if review_kind is None:
-            raise CoordinatorError(f"work item kind {work_item.kind!r} has no review kind")
+        # The complete lane-identity preflight and policy resolution are the
+        # shared resolve_lane_binding — the same function replay_context uses,
+        # so a lane can never open under an invariant replay would not check.
+        try:
+            policy, review_kind = resolve_lane_binding(project, identity)
+        except ProjectError as exc:
+            raise CoordinatorError(str(exc)) from None
         self._project = project
         self._identity = identity
         self._run_id = run_id

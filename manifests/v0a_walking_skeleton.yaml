@@ -11,9 +11,11 @@ owner: claude
 reviewer: codex
 scope_base: "103020f640e6ccfab2347ccab7018fa0b43a6bc2"
 status: >-
-  REV 4 DELIVERED 2026-09-01 — Codex round-3 review folded (R1-02 reopened
-  and repaired structurally, R1-05/R1-06 completed, new R3-01 folded);
-  awaiting Codex re-review.
+  REV 5 DELIVERED 2026-09-01 — Codex round-4 review folded (R1-02
+  guidance-only branch completed for security/open_decisions/
+  dependencies_added; R1-05 shared coordinator/replay preflight incl.
+  registered manifest + per-entry lane_id binding); awaiting Codex
+  re-review.
   Fake drivers only: no real claude/codex invocation, no live target
   execution, no landing, no push, no DB/provider access, no limit handling,
   no external notifications. T0 (the target RVA JSON contract) remains a
@@ -44,6 +46,15 @@ review_rounds:
       STILL_PRESENT: [V0A-R1-05, V0A-R1-06]
     findings: [V0A-R3-01]
     folded_in: rev 4 (all four FOLDED)
+  - round: 4
+    reviewer: codex
+    verdict: FINDINGS
+    prior_reconciliation:
+      VERIFIED_RESOLVED: [V0A-R1-01, V0A-R1-03, V0A-R1-04, V0A-R1-06, V0A-R1-07,
+                          V0A-R1-08, V0A-R2-01, V0A-R2-02, V0A-R2-03, V0A-R3-01]
+      STILL_PRESENT: [V0A-R1-02, V0A-R1-05]
+    findings: []
+    folded_in: rev 5 (both FOLDED)
 
 objective: >-
   The smallest complete deterministic loop, replayable from its own ledger:

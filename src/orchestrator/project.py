@@ -22,7 +22,9 @@ from orchestrator.model import (
     GateCategory,
     HARD_MAX_AGENT_INVOCATIONS,
     HARD_MAX_ROUNDS,
+    LaneIdentity,
     LanePolicy,
+    REVIEW_KIND_FOR_LANE_KIND,
 )
 
 
@@ -33,12 +35,43 @@ class ProjectError(Exception):
 #: Safe identifier for run/lane IDs: no path separators, no traversal, no
 #: reserved names — an identifier is never allowed to steer a filesystem path.
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def validate_identifier(kind: str, value: str) -> str:
     if not _SAFE_ID_RE.fullmatch(value) or ".." in value:
         raise ProjectError(f"unsafe {kind} identifier: {value!r}")
     return value
+
+
+def resolve_lane_binding(project: ProjectConfig, identity: LaneIdentity) -> tuple[LanePolicy, str]:
+    """The complete lane-identity preflight, returning (policy, review_kind).
+
+    Shared verbatim by the coordinator (opening a lane) and the replay
+    context (replaying one), so replay enforces every invariant the
+    coordinator does: safe lane identifier, project binding, full-SHA scope
+    base, declared work item, the manifest REGISTERED for that work item,
+    the registered lane policy, and the review kind for the lane kind.
+    """
+    validate_identifier("lane", identity.lane_id)
+    if identity.project_id != project.project_id:
+        raise ProjectError(
+            f"lane identity project {identity.project_id!r} is not the registered "
+            f"project {project.project_id!r}"
+        )
+    if not _FULL_SHA_RE.fullmatch(identity.scope_base):
+        raise ProjectError("scope_base must be a full 40-hex SHA")
+    work_item = project.work_item(identity.work_item)  # must be declared, never inferred
+    expected_manifest = f"{project.manifest_root}/{work_item.manifest}"
+    if identity.manifest != expected_manifest:
+        raise ProjectError(
+            f"manifest {identity.manifest!r} does not match the declared work item "
+            f"({expected_manifest!r})"
+        )
+    review_kind = REVIEW_KIND_FOR_LANE_KIND.get(work_item.kind)
+    if review_kind is None:
+        raise ProjectError(f"work item kind {work_item.kind!r} has no review kind")
+    return project.lane_policy(work_item.kind), review_kind
 
 
 @dataclass(frozen=True)

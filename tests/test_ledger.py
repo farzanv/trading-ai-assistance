@@ -341,6 +341,69 @@ def test_forged_lane_opened_binding_fails_replay(
         replay(path, _ctx(tmp_path))
 
 
+def test_replay_context_refuses_an_unregistered_manifest(tmp_path: Path) -> None:
+    """R1-05: the replay context runs the coordinator's full preflight — an
+    identity naming a manifest other than the one registered for the declared
+    work item never resolves."""
+    from orchestrator.ledger import replay_context
+    from orchestrator.project import load_project
+    from tests.fakes import PROJECT_ID, make_identity
+
+    run_minimal_lane(tmp_path)
+    project = load_project(tmp_path / "control-plane" / "projects", PROJECT_ID)
+    foreign = make_identity("LANE-T", manifest="dil-engine/manifests/foreign.yaml")
+    with pytest.raises(LedgerReplayError, match="declared work item"):
+        replay_context(project, foreign, "RUN-001", SCHEMAS)
+
+
+def test_forged_manifest_across_ledger_and_artifacts_fails_replay(tmp_path: Path) -> None:
+    """R1-05 counterexample: LANE_OPENED and every artifact renamed to
+    foreign.yaml, digests updated, chain recomputed — the Control-Plane-bound
+    identity still refuses the ledger."""
+    from orchestrator.artifacts import artifact_digest
+
+    path = run_minimal_lane(tmp_path)
+    artifacts_dir = path.parent / "lanes" / "LANE-T" / "artifacts"
+    digests: dict[str, str] = {}
+    for artifact_path in artifacts_dir.iterdir():
+        if artifact_path.name == "p3-backlog.json":
+            continue
+        raw = json.loads(artifact_path.read_text(encoding="utf-8"))
+        if "manifest" in raw:
+            raw["manifest"] = "dil-engine/manifests/foreign.yaml"
+            artifact_path.write_text(
+                json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        digests[artifact_path.name] = artifact_digest(raw)
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] != "EFFECT":
+            return
+        if raw["payload"].get("effect") == "LANE_OPENED":
+            raw["payload"]["manifest"] = "dil-engine/manifests/foreign.yaml"
+        if raw["payload"].get("effect") == "ARTIFACT_ACCEPTED":
+            raw["payload"]["digest"] = digests[raw["payload"]["path"]]
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="different lane identity"):
+        replay(path, _ctx(tmp_path))
+
+
+def test_forged_entry_lane_id_fails_replay(tmp_path: Path) -> None:
+    """R1-05 counterexample: a rechained foreign lane_id on any entry — not
+    only LANE_OPENED — fails replay."""
+    path = run_minimal_lane(tmp_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    target = next(i for i, line in enumerate(lines) if json.loads(line)["kind"] == "DECISION")
+    raw = json.loads(lines[target])
+    raw["lane_id"] = "FOREIGN-LANE"
+    lines[target] = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    _rewrite(path, _rechain(lines))
+    with pytest.raises(LedgerReplayError, match="lane_id does not match"):
+        replay(path, _ctx(tmp_path))
+
+
 def test_replay_refuses_a_different_lane_policy(tmp_path: Path) -> None:
     import dataclasses
 

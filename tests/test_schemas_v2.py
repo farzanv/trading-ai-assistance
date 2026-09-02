@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
-from tests.fakes import make_author_result, make_finding, make_fold, make_gate_result, make_guidance, make_review
+from tests.fakes import (
+    make_author_result,
+    make_finding,
+    make_fold,
+    make_gate_result,
+    make_guidance,
+    make_review,
+    make_security_checks,
+)
 
 SCHEMAS = Path(__file__).resolve().parents[1] / "schemas" / "v2"
 
@@ -85,10 +93,13 @@ def test_guidance_lens_requires_the_guidance_block() -> None:
         ("scope_observations", ["foreign undeclared change"]),
         ("findings", [make_finding("FX", "P1")]),
         ("prior_findings", [{"id": "F1", "outcome": "STILL_PRESENT"}]),
+        ("security", make_security_checks(fail="no_dynamic_code_execution")),
+        ("open_decisions", [{"ref": "§10", "summary": "s", "blocks_downstream": True}]),
+        ("dependencies_added", ["pkg==1.0"]),
     ],
 )
 def test_guidance_lens_is_structurally_guidance_only(field: str, value: object) -> None:
-    """R1-02: lens=guidance prohibits every stop-bearing review field."""
+    """R1-02: lens=guidance prohibits every stop-bearing or review-only field."""
     guidance = make_guidance(["F1"], **{field: value})
     with pytest.raises(ValidationError):
         _validator("review.schema.json").validate(guidance)

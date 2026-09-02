@@ -497,6 +497,53 @@ def test_guidance_carrying_stop_bearing_content_is_malformed(tmp_path: Path) -> 
     assert any("findings" in err for err in rejected[1]["errors"])
 
 
+def test_guidance_carrying_review_only_blocks_is_malformed(tmp_path: Path) -> None:
+    """R1-02 (round 4): the security checklist and open decisions are
+    review-only content — a guidance artifact carrying either is malformed
+    (retry once, then STOP), never accepted with the block discarded."""
+    from tests.fakes import make_security_checks
+
+    with_security = make_guidance(
+        ["F1"], revision=2, security=make_security_checks(fail="no_dynamic_code_execution")
+    )
+    with_open_decisions = make_guidance(
+        ["F1"],
+        revision=2,
+        open_decisions=[
+            {"ref": "§10", "summary": "template database relocation", "blocks_downstream": True}
+        ],
+    )
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-GUIDE2",
+        author=ScriptedAuthor(
+            author_results=[make_author_result()],
+            folds=[make_fold(revision=2, dispositions={"F1": "FOLDED"})],
+        ),
+        reviewer=ScriptedReviewer(
+            reviews=[
+                make_review(revision=1, verdict="FINDINGS", findings=[make_finding("F1", "P1")]),
+                make_review(revision=2, verdict="FINDINGS", prior={"F1": "STILL_PRESENT"}),
+            ],
+            guidances=[with_security, with_open_decisions],
+        ),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED
+    entries = read_entries(result.ledger_path)
+    last_decision = [e for e in entries if e.kind == "DECISION"][-1]
+    assert last_decision.payload["reason"] == ReasonCode.MALFORMED_ARTIFACT_STOP.value
+    rejected = [
+        e.payload
+        for e in entries
+        if e.kind == "EFFECT" and e.payload.get("effect") == "ARTIFACT_REJECTED"
+    ]
+    assert len(rejected) == 2 and all(r["artifact"] == "guidance" for r in rejected)
+    assert any("security" in err for err in rejected[0]["errors"])
+    assert any("open_decisions" in err for err in rejected[1]["errors"])
+
+
 def test_identity_for_a_different_project_is_refused(tmp_path: Path) -> None:
     """R1-05: the lane identity is (project_id, lane_id); a coordinator never
     opens a lane whose identity names another project."""

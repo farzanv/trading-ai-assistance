@@ -39,13 +39,15 @@ GOOD_FACTS = GitFacts(
 )
 
 
-def make_identity(lane_id: str = "LANE-SIM", project_id: str = PROJECT_ID) -> LaneIdentity:
+def make_identity(
+    lane_id: str = "LANE-SIM", project_id: str = PROJECT_ID, manifest: str = MANIFEST
+) -> LaneIdentity:
     return LaneIdentity(
         project_id=project_id,
         lane_id=lane_id,
         work_item=WORK_ITEM,
         scope_base=BASE_SHA,
-        manifest=MANIFEST,
+        manifest=manifest,
     )
 
 
@@ -221,6 +223,25 @@ def make_guidance(
     )
     guidance.update(overrides)
     return guidance
+
+
+SECURITY_CHECK_NAMES = (
+    "parameterised_sql",
+    "no_credential_logging",
+    "least_privilege_db_objects",
+    "job_robustness_contract",
+    "provider_calls_bounded_documented",
+    "dependencies_pinned_named",
+    "no_dynamic_code_execution",
+)
+
+
+def make_security_checks(fail: str | None = None, finding_id: str = "F1") -> dict[str, Any]:
+    """A complete v2 security checklist; ``fail`` marks one item FAIL."""
+    checks: dict[str, Any] = {name: {"result": "PASS"} for name in SECURITY_CHECK_NAMES}
+    if fail is not None:
+        checks[fail] = {"result": "FAIL", "note": "checklist defect", "finding_id": finding_id}
+    return checks
 
 
 def make_fold(
