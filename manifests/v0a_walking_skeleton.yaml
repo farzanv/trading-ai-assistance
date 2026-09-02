@@ -11,12 +11,13 @@ owner: claude
 reviewer: codex
 scope_base: "103020f640e6ccfab2347ccab7018fa0b43a6bc2"
 status: >-
-  REV 2 DELIVERED 2026-09-01 — Codex rev-1 review (8 P1) folded; awaiting
-  Codex re-review. Fake drivers only: no real claude/codex invocation, no live
-  target execution, no landing, no push, no DB/provider access, no limit
-  handling, no external notifications. T0 (the target RVA JSON contract)
-  remains a prerequisite for any live lane; nothing here parses the current
-  human RVA output.
+  REV 3 DELIVERED 2026-09-01 — Codex rev-2 review folded (three STILL_PRESENT
+  rev-1 findings repaired, three new P1s folded); awaiting Codex re-review.
+  Fake drivers only: no real claude/codex invocation, no live target
+  execution, no landing, no push, no DB/provider access, no limit handling,
+  no external notifications. T0 (the target RVA JSON contract) remains a
+  prerequisite for any live lane; nothing here parses the current human RVA
+  output.
 
 review_rounds:
   - round: 1
@@ -24,6 +25,14 @@ review_rounds:
     verdict: FINDINGS
     findings: [V0A-R1-01, V0A-R1-02, V0A-R1-03, V0A-R1-04, V0A-R1-05, V0A-R1-06, V0A-R1-07, V0A-R1-08]
     folded_in: rev 2 (all eight FOLDED)
+  - round: 2
+    reviewer: codex
+    verdict: FINDINGS
+    prior_reconciliation:
+      VERIFIED_RESOLVED: [V0A-R1-02, V0A-R1-03, V0A-R1-04, V0A-R1-07, V0A-R1-08]
+      STILL_PRESENT: [V0A-R1-01, V0A-R1-05, V0A-R1-06]
+    findings: [V0A-R2-01, V0A-R2-02, V0A-R2-03]
+    folded_in: rev 3 (all six FOLDED)
 
 objective: >-
   The smallest complete deterministic loop, replayable from its own ledger:

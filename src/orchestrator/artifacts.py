@@ -26,16 +26,20 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 
 from orchestrator.model import (
+    AuthorResultAccepted,
     BLOCKING_SEVERITIES,
     Disposition,
     FindingState,
+    FoldAccepted,
     GateCategory,
+    GuidanceAccepted,
     LaneIdentity,
     LEGAL_PRIOR_OUTCOMES,
     Lens,
     NewFinding,
     PriorAssessment,
     PriorOutcome,
+    ReviewAccepted,
     Severity,
 )
 
@@ -226,6 +230,7 @@ def validate_author_result(
     raw: Mapping[str, Any],
     identity: LaneIdentity,
     expected_revision: int,
+    expected_author_agent: str,
 ) -> AuthorResultSummary:
     check_persistence_safety("author-result", raw)
     _schema_validate(schemas, "author-result", raw)
@@ -238,6 +243,8 @@ def validate_author_result(
         errors.append(f"revision {raw['revision']} != expected {expected_revision}")
     if raw["commit"] == identity.scope_base:
         errors.append("commit equals scope_base (no new revision)")
+    if raw["author"]["agent"] != expected_author_agent:
+        errors.append("author agent is not the lane's authorized author")
     if errors:
         raise ArtifactError("author-result", errors)
     return AuthorResultSummary(
@@ -255,6 +262,7 @@ def validate_fold(
     outstanding_ids: frozenset[str],
     expected_revision: int,
     prev_sha: str,
+    expected_author_agent: str,
 ) -> FoldSummary:
     check_persistence_safety("fold", raw)
     _schema_validate(schemas, "fold", raw)
@@ -265,6 +273,8 @@ def validate_fold(
         errors.append("folded_review_range does not match the reviewed lane range")
     if raw["commit"] in {prev_sha, identity.scope_base}:
         errors.append("commit is not a new revision")
+    if raw["author"]["agent"] != expected_author_agent:
+        errors.append("author agent is not the lane's authorized author")
     seen: list[str] = [d["finding_id"] for d in raw["dispositions"]]
     duplicates = sorted({fid for fid in seen if seen.count(fid) > 1})
     if duplicates:
@@ -312,6 +322,9 @@ def validate_review(
     historical: Mapping[str, FindingState],
     current_sha: str,
     current_tree: str,
+    expected_review_kind: str,
+    expected_reviewer_agent: str,
+    handoff_authorized: bool = False,
 ) -> ReviewSummary:
     check_persistence_safety("review", raw)
     _schema_validate(schemas, "review", raw)
@@ -319,6 +332,16 @@ def validate_review(
     _check_review_binding(raw, identity, current_sha, current_tree, errors)
     if raw["lens"] != expected_lens.value:
         errors.append(f"lens {raw['lens']!r} != expected {expected_lens.value!r}")
+    if raw["review_kind"] != expected_review_kind:
+        errors.append(
+            f"review_kind {raw['review_kind']!r} != lane's {expected_review_kind!r}"
+        )
+    if raw["reviewer"]["agent"] != expected_reviewer_agent:
+        # Structural non-authoring review: only the lane's authorized
+        # non-authoring reviewer can gate; author self-review never validates.
+        errors.append("reviewer agent is not the lane's authorized reviewer")
+    if raw.get("handoff") is not None and not handoff_authorized:
+        errors.append("handoff provenance is not authorized for this lane")
 
     finding_ids = [f["id"] for f in raw["findings"]]
     duplicate_new = sorted({fid for fid in finding_ids if finding_ids.count(fid) > 1})
@@ -366,13 +389,32 @@ def validate_review(
         errors.append("verdict FINDINGS without any blocking finding or unresolved prior")
     security = raw.get("security")
     if security is not None:
-        failed_items = sorted(
-            name for name, item in security.items() if item["result"] == "FAIL"
-        )
-        if failed_items and clean_expected:
-            errors.append(
-                f"security checklist FAIL without blocking finding evidence: {failed_items}"
-            )
+        # Every failed checklist item must be represented by its OWN blocking
+        # finding, so the defect gets a stable ID and exact-set reconciliation
+        # until resolved — it can never hitchhike on an unrelated finding.
+        blocking_new_ids = {f["id"] for f in blocking_new}
+        unresolved_prior_ids = {p["id"] for p in unresolved_prior}
+        open_ids = blocking_new_ids | unresolved_prior_ids
+        associated: dict[str, str] = {}
+        for name in sorted(security):
+            item = security[name]
+            if item["result"] != "FAIL":
+                continue
+            finding_id = item.get("finding_id")
+            if finding_id is None:
+                errors.append(f"security item {name} FAIL without finding_id")
+                continue
+            if finding_id not in open_ids:
+                errors.append(
+                    f"security item {name} FAIL names {finding_id}, which is not an "
+                    f"open blocking finding in this review"
+                )
+            if finding_id in associated:
+                errors.append(
+                    f"security items {associated[finding_id]} and {name} share "
+                    f"finding {finding_id}; each FAIL needs its own finding"
+                )
+            associated[finding_id] = name
     if errors:
         raise ArtifactError("review", errors)
 
@@ -412,6 +454,8 @@ def validate_guidance(
     expected_finding_ids: frozenset[str],
     current_sha: str,
     current_tree: str,
+    expected_review_kind: str,
+    expected_reviewer_agent: str,
 ) -> GuidanceSummary:
     """Guidance is a review/v2 artifact with ``lens: guidance`` and no code."""
     check_persistence_safety("guidance", raw)
@@ -420,6 +464,14 @@ def validate_guidance(
     _check_review_binding(raw, identity, current_sha, current_tree, errors)
     if raw["lens"] != Lens.GUIDANCE.value:
         errors.append(f"lens {raw['lens']!r} != expected 'guidance'")
+    if raw["review_kind"] != expected_review_kind:
+        errors.append(
+            f"review_kind {raw['review_kind']!r} != lane's {expected_review_kind!r}"
+        )
+    if raw["reviewer"]["agent"] != expected_reviewer_agent:
+        errors.append("reviewer agent is not the lane's authorized reviewer")
+    if raw.get("handoff") is not None:
+        errors.append("handoff provenance is not authorized for this lane")
     guidance = raw.get("guidance")
     if guidance is None:
         errors.append("guidance block missing")
@@ -465,3 +517,42 @@ def validate_gate_result(
     if errors:
         raise ArtifactError("target-gate-result", errors)
     return GateSummary(category=category, verdict=raw["verdict"], failed_checks=failed_checks)
+
+
+# ---------------------------------------------------------------------------
+# Summary -> typed event (shared by the coordinator and ledger replay, so a
+# re-validated artifact provably derives the same event that was ledgered)
+# ---------------------------------------------------------------------------
+
+
+def event_from_author_summary(summary: AuthorResultSummary) -> AuthorResultAccepted:
+    return AuthorResultAccepted(
+        revision=summary.revision,
+        commit=summary.commit,
+        tree_digest=summary.tree_digest,
+        has_unknown_contracts=summary.has_unknown_contracts,
+    )
+
+
+def event_from_fold_summary(summary: FoldSummary) -> FoldAccepted:
+    return FoldAccepted(
+        revision=summary.revision,
+        commit=summary.commit,
+        tree_digest=summary.tree_digest,
+        dispositions=summary.dispositions,
+        has_unknown_contracts=summary.has_unknown_contracts,
+    )
+
+
+def event_from_review_summary(summary: ReviewSummary) -> ReviewAccepted:
+    return ReviewAccepted(
+        lens=summary.lens,
+        verdict=summary.verdict,
+        has_scope_observations=summary.has_scope_observations,
+        new_findings=summary.new_findings,
+        prior_findings=summary.prior_findings,
+    )
+
+
+def event_from_guidance_summary(summary: GuidanceSummary) -> GuidanceAccepted:
+    return GuidanceAccepted(finding_ids=summary.finding_ids)

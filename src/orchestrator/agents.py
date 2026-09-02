@@ -57,6 +57,31 @@ class GitFacts:
     worktree_clean: bool
 
 
+@dataclass(frozen=True)
+class CandidateFacts:
+    """What the repository itself says about a claimed candidate commit.
+
+    Established by the Git driver, never taken from the artifact: the commit
+    must exist, the claimed tree must be Git's tree for that commit, and the
+    commit must descend from BOTH the immutable scope base and the previously
+    accepted candidate — a repair can never roll the lane back to an earlier
+    revision.
+    """
+
+    exists: bool
+    tree_digest: str
+    descends_from_scope_base: bool
+    descends_from_previous_candidate: bool
+
+
+class GitDriver(Protocol):
+    def candidate_facts(
+        self, spec: InvocationSpec, commit: str, previous_candidate: str
+    ) -> CandidateFacts:
+        """Resolve repository facts for a claimed author/repair commit."""
+        ...
+
+
 class AuthorDriver(Protocol):
     def author(self, spec: InvocationSpec) -> Mapping[str, Any]:
         """Produce an author-result/v2 artifact for the initial revision."""

@@ -23,11 +23,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from orchestrator.agents import AuthorDriver, GateDriver, InvocationSpec, ReviewerDriver
+from orchestrator.agents import (
+    AuthorDriver,
+    CandidateFacts,
+    GateDriver,
+    GitDriver,
+    InvocationSpec,
+    ReviewerDriver,
+)
 from orchestrator.artifacts import (
     ArtifactError,
     SchemaSet,
     artifact_digest,
+    event_from_author_summary,
+    event_from_fold_summary,
+    event_from_guidance_summary,
+    event_from_review_summary,
     validate_author_result,
     validate_fold,
     validate_gate_result,
@@ -38,13 +49,9 @@ from orchestrator.ledger import KIND_DECISION, KIND_EFFECT, Ledger
 from orchestrator.model import (
     AgentAction,
     ArtifactRejected,
-    AuthorResultAccepted,
     Awaiting,
     Command,
     Event,
-    FindingState,
-    FoldAccepted,
-    GuidanceAccepted,
     InvokeAuthor,
     InvokeGuidance,
     InvokeReviewer,
@@ -55,7 +62,7 @@ from orchestrator.model import (
     LaneSnapshot,
     Lens,
     OpenHumanGate,
-    ReviewAccepted,
+    REVIEW_KIND_FOR_LANE_KIND,
     RevisionVerified,
     Severity,
     VerifyRevision,
@@ -90,11 +97,11 @@ class LaneCoordinator:
         project: ProjectConfig,
         identity: LaneIdentity,
         run_id: str,
-        policy: LanePolicy,
         schemas: SchemaSet,
         author: AuthorDriver,
         reviewer: ReviewerDriver,
         gate: GateDriver,
+        git: GitDriver,
         clock: Callable[[], str] = _utc_now,
     ) -> None:
         validate_identifier("lane", identity.lane_id)
@@ -107,14 +114,22 @@ class LaneCoordinator:
                 f"manifest {identity.manifest!r} does not match the declared work item "
                 f"({expected_manifest!r})"
             )
+        # The effective policy is resolved from the registered project for the
+        # declared work-item kind; callers cannot substitute one (PCP §3, §6).
+        policy = project.lane_policy(work_item.kind)
+        review_kind = REVIEW_KIND_FOR_LANE_KIND.get(work_item.kind)
+        if review_kind is None:
+            raise CoordinatorError(f"work item kind {work_item.kind!r} has no review kind")
         self._project = project
         self._identity = identity
         self._run_id = run_id
         self._policy = policy
+        self._review_kind = review_kind
         self._schemas = schemas
         self._author = author
         self._reviewer = reviewer
         self._gate = gate
+        self._git = git
         self._run_dir = project.run_dir(run_id)  # containment-checked, project-local
         self._artifacts_dir = self._run_dir / "lanes" / identity.lane_id / "artifacts"
         self._clock = clock
@@ -123,6 +138,10 @@ class LaneCoordinator:
     @property
     def ledger_path(self) -> Path:
         return self._ledger.path
+
+    @property
+    def policy(self) -> LanePolicy:
+        return self._policy
 
     def run(self, max_steps: int = 200) -> RunResult:
         """Drive the lane from AUTHORIZED until convergence, gate, or STOP."""
@@ -175,6 +194,8 @@ class LaneCoordinator:
                 "policy_digest": policy_digest(self._policy),
                 "package_digests": [list(pair) for pair in self._project.package_digests],
                 "schemas_digest": self._schemas.digest,
+                "config_digest": self._project.config_digest,
+                "work_index_digest": self._project.work_index_digest,
             },
         )
 
@@ -240,23 +261,46 @@ class LaneCoordinator:
             },
         )
 
-    def _accept_artifact(self, kind: str, spec: InvocationSpec, raw: object) -> None:
+    def _accept_artifact(
+        self,
+        kind: str,
+        spec: InvocationSpec,
+        raw: object,
+        git_facts: CandidateFacts | None = None,
+    ) -> None:
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         path = self._artifacts_dir / f"{spec.invocation_id}-{kind}.json"
         canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         path.write_text(canonical + "\n", encoding="utf-8")
-        self._ledger.append(
-            KIND_EFFECT,
-            self._identity.lane_id,
-            self._clock(),
-            {
-                "effect": "ARTIFACT_ACCEPTED",
-                "artifact": kind,
-                "invocation_id": spec.invocation_id,
-                "digest": artifact_digest(raw),  # type: ignore[arg-type]
-                "path": path.name,
-            },
-        )
+        payload: dict = {
+            "effect": "ARTIFACT_ACCEPTED",
+            "artifact": kind,
+            "invocation_id": spec.invocation_id,
+            "digest": artifact_digest(raw),  # type: ignore[arg-type]
+            "path": path.name,
+        }
+        if git_facts is not None:
+            payload["git"] = {
+                "exists": git_facts.exists,
+                "tree_digest": git_facts.tree_digest,
+                "descends_from_scope_base": git_facts.descends_from_scope_base,
+                "descends_from_previous_candidate": git_facts.descends_from_previous_candidate,
+            }
+        self._ledger.append(KIND_EFFECT, self._identity.lane_id, self._clock(), payload)
+
+    def _candidate_errors(self, claimed_tree: str, facts: CandidateFacts) -> list[str]:
+        """Repository facts must corroborate the claimed candidate (never trust)."""
+        errors: list[str] = []
+        if not facts.exists:
+            errors.append("claimed commit does not exist in the lane repository")
+            return errors
+        if facts.tree_digest != claimed_tree:
+            errors.append("claimed tree_digest is not the commit's tree in Git")
+        if not facts.descends_from_scope_base:
+            errors.append("commit does not descend from scope_base")
+        if not facts.descends_from_previous_candidate:
+            errors.append("commit does not descend from the previous accepted candidate")
+        return errors
 
     def _reject_artifact(self, kind: str, spec: InvocationSpec, error: ArtifactError) -> None:
         # ArtifactError.errors is sanitized (paths/keywords, no raw values).
@@ -291,18 +335,23 @@ class LaneCoordinator:
         raw = self._author.author(spec)
         try:
             summary = validate_author_result(
-                self._schemas, raw, identity=self._identity, expected_revision=1
+                self._schemas,
+                raw,
+                identity=self._identity,
+                expected_revision=1,
+                expected_author_agent=self._policy.author_agent,
             )
         except ArtifactError as exc:
             self._reject_artifact("author-result", spec, exc)
             return ArtifactRejected(artifact=Awaiting.AUTHOR_RESULT)
-        self._accept_artifact("author-result", spec, raw)
-        return AuthorResultAccepted(
-            revision=summary.revision,
-            commit=summary.commit,
-            tree_digest=summary.tree_digest,
-            has_unknown_contracts=summary.has_unknown_contracts,
-        )
+        # The first candidate's previous candidate is the immutable base.
+        facts = self._git.candidate_facts(spec, summary.commit, self._identity.scope_base)
+        errors = self._candidate_errors(summary.tree_digest, facts)
+        if errors:
+            self._reject_artifact("author-result", spec, ArtifactError("author-result", errors))
+            return ArtifactRejected(artifact=Awaiting.AUTHOR_RESULT)
+        self._accept_artifact("author-result", spec, raw, git_facts=facts)
+        return event_from_author_summary(summary)
 
     def _do_repair(self, snapshot: LaneSnapshot) -> Event:
         spec = self._spec(snapshot, "author", AgentAction.REPAIR)
@@ -316,18 +365,20 @@ class LaneCoordinator:
                 outstanding_ids=snapshot.fold_outstanding_ids(),
                 expected_revision=snapshot.revision + 1,
                 prev_sha=snapshot.current_sha,
+                expected_author_agent=self._policy.author_agent,
             )
         except ArtifactError as exc:
             self._reject_artifact("fold", spec, exc)
             return ArtifactRejected(artifact=Awaiting.FOLD)
-        self._accept_artifact("fold", spec, raw)
-        return FoldAccepted(
-            revision=summary.revision,
-            commit=summary.commit,
-            tree_digest=summary.tree_digest,
-            dispositions=summary.dispositions,
-            has_unknown_contracts=summary.has_unknown_contracts,
-        )
+        # A repair must ADVANCE the lane: descend from the previous accepted
+        # candidate, never roll back to an earlier revision.
+        facts = self._git.candidate_facts(spec, summary.commit, snapshot.current_sha)
+        errors = self._candidate_errors(summary.tree_digest, facts)
+        if errors:
+            self._reject_artifact("fold", spec, ArtifactError("fold", errors))
+            return ArtifactRejected(artifact=Awaiting.FOLD)
+        self._accept_artifact("fold", spec, raw, git_facts=facts)
+        return event_from_fold_summary(summary)
 
     def _do_verify(self, snapshot: LaneSnapshot) -> Event:
         spec = self._spec(snapshot, "gate", None)
@@ -368,39 +419,32 @@ class LaneCoordinator:
                 historical=snapshot.historical_blocking_states(),
                 current_sha=snapshot.current_sha,
                 current_tree=snapshot.current_tree,
+                expected_review_kind=self._review_kind,
+                expected_reviewer_agent=self._policy.reviewer_agent,
             )
         except ArtifactError as exc:
             self._reject_artifact("review", spec, exc)
             return ArtifactRejected(artifact=Awaiting.REVIEW)
         self._accept_artifact("review", spec, raw)
-        return ReviewAccepted(
-            lens=summary.lens,
-            verdict=summary.verdict,
-            has_scope_observations=summary.has_scope_observations,
-            new_findings=summary.new_findings,
-            prior_findings=summary.prior_findings,
-        )
+        return event_from_review_summary(summary)
 
     def _do_guidance(self, snapshot: LaneSnapshot) -> Event:
         spec = self._spec(snapshot, "reviewer", AgentAction.GUIDANCE)
         self._plan_invocation(spec, counted=True, count=snapshot.agent_invocations)
         raw = self._reviewer.guidance(spec)
-        expected = frozenset(
-            f.finding_id
-            for f in snapshot.findings
-            if f.blocking and f.state is FindingState.GUIDANCE_REQUIRED and not f.guidance_given
-        )
         try:
             summary = validate_guidance(
                 self._schemas,
                 raw,
                 identity=self._identity,
-                expected_finding_ids=expected,
+                expected_finding_ids=snapshot.guidance_expected_ids(),
                 current_sha=snapshot.current_sha,
                 current_tree=snapshot.current_tree,
+                expected_review_kind=self._review_kind,
+                expected_reviewer_agent=self._policy.reviewer_agent,
             )
         except ArtifactError as exc:
             self._reject_artifact("guidance", spec, exc)
             return ArtifactRejected(artifact=Awaiting.GUIDANCE)
         self._accept_artifact("guidance", spec, raw)
-        return GuidanceAccepted(finding_ids=summary.finding_ids)
+        return event_from_guidance_summary(summary)

@@ -24,6 +24,7 @@ from tests.fakes import (
     ScriptedReviewer,
     build_coordinator,
     make_author_result,
+    make_identity,
     make_review,
 )
 
@@ -34,6 +35,7 @@ POLICY = LanePolicy(
         {GateCategory.PASS, GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS}
     ),
 )
+IDENTITY = make_identity("LANE-T")
 
 
 def run_minimal_lane(tmp_path: Path) -> Path:
@@ -41,13 +43,13 @@ def run_minimal_lane(tmp_path: Path) -> Path:
     coordinator = build_coordinator(
         tmp_path,
         lane_id="LANE-T",
-        policy=POLICY,
         schemas=SCHEMAS,
         author=ScriptedAuthor(author_results=[make_author_result()]),
         reviewer=ScriptedReviewer(reviews=[make_review(verdict="CLEAN", revision=1)]),
         gate=ScriptedGate(),
         clock=lambda: "2026-09-01T00:00:00+00:00",
     )
+    assert coordinator.policy == POLICY  # resolved from the registered project
     result = coordinator.run()
     assert result.snapshot.state is LaneState.LANDING
     return result.ledger_path
@@ -78,7 +80,7 @@ def test_valid_ledger_reads_and_replays(tmp_path: Path) -> None:
     assert entries[0].prev_digest == "0" * 64
     assert entries[0].payload["effect"] == "LANE_OPENED"
     assert [e.seq for e in entries] == list(range(1, len(entries) + 1))
-    snapshot = replay(path, POLICY)
+    snapshot = replay(path, POLICY, IDENTITY, SCHEMAS)
     assert snapshot.state is LaneState.LANDING
     assert snapshot.review_round == 1
     assert snapshot.agent_invocations == 2
@@ -165,7 +167,7 @@ def test_chain_aware_transition_forgery_fails_replay(tmp_path: Path) -> None:
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
 
 
 def test_chain_aware_predicate_input_forgery_fails_replay(tmp_path: Path) -> None:
@@ -177,7 +179,7 @@ def test_chain_aware_predicate_input_forgery_fails_replay(tmp_path: Path) -> Non
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="predicate inputs"):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
 
 
 def test_chain_aware_snapshot_forgery_fails_replay(tmp_path: Path) -> None:
@@ -189,7 +191,7 @@ def test_chain_aware_snapshot_forgery_fails_replay(tmp_path: Path) -> None:
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="snapshot"):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
 
 
 def test_chain_aware_artifact_digest_forgery_fails_replay(tmp_path: Path) -> None:
@@ -201,7 +203,7 @@ def test_chain_aware_artifact_digest_forgery_fails_replay(tmp_path: Path) -> Non
 
     _forge(path, mutate)
     with pytest.raises(LedgerReplayError, match="digest does not match"):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
 
 
 def test_mutated_artifact_file_fails_replay(tmp_path: Path) -> None:
@@ -212,7 +214,7 @@ def test_mutated_artifact_file_fails_replay(tmp_path: Path) -> None:
     raw["verdict"] = "FINDINGS"
     target.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
     with pytest.raises(LedgerReplayError, match="digest does not match"):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
 
 
 def test_deleted_effect_evidence_fails_replay(tmp_path: Path) -> None:
@@ -225,7 +227,93 @@ def test_deleted_effect_evidence_fails_replay(tmp_path: Path) -> None:
     del lines[planned]
     _rewrite(path, _rechain(lines))
     with pytest.raises(LedgerReplayError):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
+
+
+def test_swapped_artifact_with_forged_digest_and_chain_fails_replay(tmp_path: Path) -> None:
+    """Even forging artifact + digest + full chain cannot forge a run: replay
+    re-validates the artifact content and re-derives the typed event."""
+    from orchestrator.artifacts import artifact_digest
+
+    path = run_minimal_lane(tmp_path)
+    artifacts_dir = path.parent / "lanes" / "LANE-T" / "artifacts"
+    target = next(p for p in artifacts_dir.iterdir() if "review" in p.name)
+    garbage = {"schema_version": 2, "unrelated": True}
+    target.write_text(
+        json.dumps(garbage, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "ARTIFACT_ACCEPTED":
+            if raw["payload"]["artifact"] == "review":
+                raw["payload"]["digest"] = artifact_digest(garbage)
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="fails re-validation"):
+        replay(path, POLICY, IDENTITY, SCHEMAS)
+
+
+def test_swapped_valid_but_different_artifact_fails_replay(tmp_path: Path) -> None:
+    """A well-formed substitute that derives a DIFFERENT event is also caught."""
+    from orchestrator.artifacts import artifact_digest
+
+    path = run_minimal_lane(tmp_path)
+    artifacts_dir = path.parent / "lanes" / "LANE-T" / "artifacts"
+    target = next(p for p in artifacts_dir.iterdir() if "review" in p.name)
+    substitute = make_review(
+        verdict="FINDINGS",
+        revision=1,
+        findings=[
+            {
+                "id": "FX",
+                "severity": "P1",
+                "section": "§1",
+                "title": "planted",
+                "description": "planted",
+                "required_change": "planted",
+                "root_cause": "planted",
+                "consequence": "planted",
+                "recommended_approach": "planted",
+                "closure_evidence": "planted",
+                "requires_ruling": False,
+                "earlier_phase_gap": None,
+                "blocks_downstream": False,
+                "unknown_contract": False,
+            }
+        ],
+    )
+    target.write_text(
+        json.dumps(substitute, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    def mutate(raw: dict) -> None:
+        if raw["kind"] == "EFFECT" and raw["payload"].get("effect") == "ARTIFACT_ACCEPTED":
+            if raw["payload"]["artifact"] == "review":
+                raw["payload"]["digest"] = artifact_digest(substitute)
+
+    _forge(path, mutate)
+    with pytest.raises(LedgerReplayError, match="does not derive the ledgered event"):
+        replay(path, POLICY, IDENTITY, SCHEMAS)
+
+
+def test_replay_refuses_a_different_lane_identity(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+    with pytest.raises(LedgerReplayError, match="different lane identity"):
+        replay(path, POLICY, make_identity("LANE-OTHER"), SCHEMAS)
+
+
+def test_replay_verifies_caller_supplied_project_context(tmp_path: Path) -> None:
+    path = run_minimal_lane(tmp_path)
+    with pytest.raises(LedgerReplayError, match="different project packages"):
+        replay(
+            path,
+            POLICY,
+            IDENTITY,
+            SCHEMAS,
+            expected_package_digests=(("agents.author", "0" * 64),),
+        )
+    with pytest.raises(LedgerReplayError, match="different project configuration"):
+        replay(path, POLICY, IDENTITY, SCHEMAS, expected_config_digest="0" * 64)
 
 
 def test_replay_refuses_a_different_lane_policy(tmp_path: Path) -> None:
@@ -235,7 +323,7 @@ def test_replay_refuses_a_different_lane_policy(tmp_path: Path) -> None:
         accepted_gate_categories=frozenset({GateCategory.PASS}),
     )
     with pytest.raises(LedgerReplayError, match="different lane policy"):
-        replay(path, other)
+        replay(path, other, IDENTITY, SCHEMAS)
 
 
 def test_replay_refuses_an_incomplete_run(tmp_path: Path) -> None:
@@ -243,7 +331,7 @@ def test_replay_refuses_an_incomplete_run(tmp_path: Path) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
     _rewrite(path, _rechain(lines[:-1]))  # drop RUN_END
     with pytest.raises(LedgerReplayError, match="RUN_END"):
-        replay(path, POLICY)
+        replay(path, POLICY, IDENTITY, SCHEMAS)
 
 
 def test_append_continues_an_existing_chain(tmp_path: Path) -> None:

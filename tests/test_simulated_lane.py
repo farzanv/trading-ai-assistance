@@ -25,6 +25,7 @@ from tests.fakes import (
     make_finding,
     make_fold,
     make_guidance,
+    make_identity,
     make_review,
     tree,
 )
@@ -43,7 +44,6 @@ def coordinator_for(tmp_path: Path, *, lane_id: str, author, reviewer, gate):
     return build_coordinator(
         tmp_path,
         lane_id=lane_id,
-        policy=POLICY,
         schemas=SCHEMAS,
         author=author,
         reviewer=reviewer,
@@ -151,7 +151,10 @@ def test_simulated_lane_ledger_is_complete_and_replayable(tmp_path: Path) -> Non
 
     # Replay re-runs the pure reducer over every recorded event, enforces the
     # effect protocol, and re-verifies every persisted artifact digest.
-    assert replay(result.ledger_path, POLICY) == result.snapshot
+    assert (
+        replay(result.ledger_path, POLICY, make_identity(lane_id="LANE-SIM"), SCHEMAS)
+        == result.snapshot
+    )
 
 
 def test_two_identical_runs_are_deterministic(tmp_path: Path) -> None:
@@ -219,7 +222,10 @@ def test_second_malformed_review_stops_the_lane(tmp_path: Path) -> None:
     entries = read_entries(result.ledger_path)
     last_decision = [e for e in entries if e.kind == "DECISION"][-1]
     assert last_decision.payload["reason"] == ReasonCode.MALFORMED_ARTIFACT_STOP.value
-    assert replay(result.ledger_path, POLICY).state is LaneState.STOPPED
+    assert (
+        replay(result.ledger_path, POLICY, make_identity(lane_id="LANE-STOP"), SCHEMAS).state
+        is LaneState.STOPPED
+    )
 
 
 def test_unbound_review_naming_a_foreign_revision_stops_the_lane(tmp_path: Path) -> None:
@@ -325,3 +331,132 @@ def test_max_rounds_exhaustion_stops_never_forces_acceptance(tmp_path: Path) -> 
     assert result.snapshot.review_round == 10
     last_decision = [e for e in read_entries(result.ledger_path) if e.kind == "DECISION"][-1]
     assert last_decision.payload["reason"] == ReasonCode.MAX_ROUNDS_EXCEEDED.value
+
+
+def test_repair_rolling_back_to_an_earlier_candidate_stops_the_lane(tmp_path: Path) -> None:
+    """R1-01 regression: a fold naming any earlier lane commit is refused by
+    the Git facts (no descent from the previous accepted candidate)."""
+    from tests.fakes import sha
+
+    rollback = make_fold(
+        revision=3, dispositions={"F1": "FOLDED"}, commit=sha(1), tree_digest=tree(1)
+    )
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-ROLLBACK",
+        author=ScriptedAuthor(
+            author_results=[make_author_result()],
+            folds=[
+                make_fold(revision=2, dispositions={"F1": "FOLDED"}),
+                rollback,
+                dict(rollback),
+            ],
+        ),
+        reviewer=ScriptedReviewer(
+            reviews=[
+                make_review(revision=1, verdict="FINDINGS", findings=[make_finding("F1", "P1")]),
+                make_review(revision=2, verdict="FINDINGS", prior={"F1": "STILL_PRESENT"}),
+            ],
+            guidances=[make_guidance(["F1"], revision=2)],
+        ),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED
+    assert result.snapshot.current_sha == sha(2)  # the lane never rolled back
+    rejected = [
+        e.payload
+        for e in read_entries(result.ledger_path)
+        if e.kind == "EFFECT" and e.payload.get("effect") == "ARTIFACT_REJECTED"
+    ]
+    assert len(rejected) == 2 and all(r["artifact"] == "fold" for r in rejected)
+    assert any("previous accepted candidate" in err for r in rejected for err in r["errors"])
+
+
+def test_fixable_gate_failure_is_repaired_and_reconciled_by_the_reviewer(tmp_path: Path) -> None:
+    """R2-01: the SYS gate finding stays in the reviewer's exact set; the
+    passing gate is its closure evidence and the reviewer reconciles it."""
+    from tests.fakes import GOOD_FACTS, make_gate_result
+
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-SYSGATE",
+        author=ScriptedAuthor(
+            author_results=[make_author_result()],
+            folds=[make_fold(revision=2, dispositions={"SYS-FIXABLE_TEST": "FOLDED"})],
+        ),
+        reviewer=ScriptedReviewer(
+            reviews=[
+                make_review(
+                    revision=2,
+                    verdict="CLEAN",
+                    prior={"SYS-FIXABLE_TEST": "VERIFIED_RESOLVED"},
+                )
+            ]
+        ),
+        gate=ScriptedGate(
+            results=[(GOOD_FACTS, make_gate_result("FIXABLE_TEST", revision=1))]
+        ),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.LANDING
+    record = result.snapshot.finding("SYS-FIXABLE_TEST")
+    assert record.state is FindingState.VERIFIED_RESOLVED
+    assert (
+        replay(result.ledger_path, POLICY, make_identity(lane_id="LANE-SYSGATE"), SCHEMAS)
+        == result.snapshot
+    )
+
+
+def test_review_omitting_the_sys_gate_finding_is_malformed(tmp_path: Path) -> None:
+    from tests.fakes import GOOD_FACTS, make_gate_result
+
+    unreconciled = make_review(revision=2, verdict="CLEAN")  # empty prior_findings
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-SYSMISS",
+        author=ScriptedAuthor(
+            author_results=[make_author_result()],
+            folds=[make_fold(revision=2, dispositions={"SYS-FIXABLE_TEST": "FOLDED"})],
+        ),
+        reviewer=ScriptedReviewer(reviews=[unreconciled, dict(unreconciled)]),
+        gate=ScriptedGate(
+            results=[(GOOD_FACTS, make_gate_result("FIXABLE_TEST", revision=1))]
+        ),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED
+
+
+def test_author_self_review_cannot_gate(tmp_path: Path) -> None:
+    """R2-02: a gating review claiming the lane author as reviewer is malformed."""
+    self_review = make_review(revision=1, verdict="CLEAN", reviewer={"agent": "claude"})
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-SELF",
+        author=ScriptedAuthor(author_results=[make_author_result()]),
+        reviewer=ScriptedReviewer(reviews=[self_review, dict(self_review)]),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED
+    rejected = [
+        e.payload
+        for e in read_entries(result.ledger_path)
+        if e.kind == "EFFECT" and e.payload.get("effect") == "ARTIFACT_REJECTED"
+    ]
+    assert any("authorized reviewer" in err for r in rejected for err in r["errors"])
+
+
+def test_wrong_review_kind_for_the_lane_is_malformed(tmp_path: Path) -> None:
+    """R2-02: a design lane accepts only review_kind=design gating reviews."""
+    wrong_kind = make_review(revision=1, verdict="CLEAN", review_kind="bookkeeping")
+    coordinator = coordinator_for(
+        tmp_path,
+        lane_id="LANE-KIND",
+        author=ScriptedAuthor(author_results=[make_author_result()]),
+        reviewer=ScriptedReviewer(reviews=[wrong_kind, dict(wrong_kind)]),
+        gate=ScriptedGate(),
+    )
+    result = coordinator.run()
+    assert result.snapshot.state is LaneState.STOPPED

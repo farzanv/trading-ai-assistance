@@ -24,10 +24,33 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from orchestrator.artifacts import (
+    ArtifactError,
+    SchemaSet,
+    event_from_author_summary,
+    event_from_fold_summary,
+    event_from_guidance_summary,
+    event_from_review_summary,
+    validate_author_result,
+    validate_fold,
+    validate_gate_result,
+    validate_guidance,
+    validate_review,
+)
 from orchestrator.model import (
+    AuthorResultAccepted,
+    Event,
+    FoldAccepted,
+    GuidanceAccepted,
+    LaneIdentity,
     LanePolicy,
     LaneSnapshot,
+    Lens,
+    REVIEW_KIND_FOR_LANE_KIND,
+    ReviewAccepted,
+    RevisionVerified,
     event_from_dict,
+    event_to_dict,
     policy_digest,
     snapshot_to_dict,
 )
@@ -57,6 +80,8 @@ _LANE_OPENED_KEYS = frozenset(
         "policy_digest",
         "package_digests",
         "schemas_digest",
+        "config_digest",
+        "work_index_digest",
     }
 )
 _AGENT_COMMANDS = frozenset({"InvokeAuthor", "InvokeReviewer", "InvokeGuidance"})
@@ -201,13 +226,12 @@ def read_entries(path: Path) -> list[LedgerEntry]:
     return entries
 
 
-def _artifact_file_digest(path: Path) -> str:
+def _load_artifact(path: Path) -> Mapping[str, Any]:
     try:
         with path.open(encoding="utf-8") as fh:
-            raw = json.load(fh)
+            return json.load(fh)
     except (OSError, json.JSONDecodeError) as exc:
         raise LedgerReplayError(f"accepted artifact unreadable: {path.name}: {exc}") from None
-    return hashlib.sha256(_canonical(raw).encode("utf-8")).hexdigest()
 
 
 def _check_effect_gap(
@@ -216,16 +240,20 @@ def _check_effect_gap(
     prev_command: str | None,
     event_payload: Mapping[str, Any],
     invocations_after_prev: int,
-    artifacts_dir: Path | None,
-) -> None:
+    artifacts_dir: Path,
+) -> Mapping[str, Any] | None:
     """The effects between two decisions must match the issued command and the
     event the next decision consumed — invocation planned, then exactly one
-    accepted (digest-bound) or rejected artifact of the right kind."""
+    accepted (digest-bound) or rejected artifact of the right kind.
+
+    Returns the ARTIFACT_ACCEPTED payload for an accepted event (so the caller
+    can re-validate the artifact content), or None for rejections/authorization.
+    """
     event_kind = event_payload["kind"]
     if prev_command is None:
         if gap or event_kind != "LaneAuthorized":
             raise LedgerReplayError(f"seq {seq}: unexpected evidence before lane authorization")
-        return
+        return None
     if len(gap) != 2:
         raise LedgerReplayError(
             f"seq {seq}: expected invocation+artifact evidence for {prev_command}, "
@@ -246,33 +274,144 @@ def _check_effect_gap(
         expected_kind = _AWAITING_ARTIFACT_KIND[event_payload["artifact"]]
         if outcome.get("effect") != "ARTIFACT_REJECTED" or outcome.get("artifact") != expected_kind:
             raise LedgerReplayError(f"seq {seq}: rejected artifact evidence missing or wrong kind")
-        return
+        return None
     expected_kind = _EVENT_ARTIFACT_KIND.get(event_kind)
     if expected_kind is None:
         raise LedgerReplayError(f"seq {seq}: no artifact contract for event {event_kind}")
     if outcome.get("effect") != "ARTIFACT_ACCEPTED" or outcome.get("artifact") != expected_kind:
         raise LedgerReplayError(f"seq {seq}: accepted artifact evidence missing or wrong kind")
-    if artifacts_dir is not None:
-        recorded = outcome.get("digest")
-        actual = _artifact_file_digest(artifacts_dir / outcome["path"])
-        if recorded != actual:
-            raise LedgerReplayError(
-                f"seq {seq}: artifact {outcome['path']} digest does not match the ledger"
+    raw = _load_artifact(artifacts_dir / outcome["path"])
+    actual = hashlib.sha256(_canonical(raw).encode("utf-8")).hexdigest()
+    if outcome.get("digest") != actual:
+        raise LedgerReplayError(
+            f"seq {seq}: artifact {outcome['path']} digest does not match the ledger"
+        )
+    return outcome
+
+
+def _rederive_event(
+    seq: int,
+    event: Event,
+    outcome: Mapping[str, Any],
+    snapshot: LaneSnapshot,
+    policy: LanePolicy,
+    identity: LaneIdentity,
+    schemas: SchemaSet,
+    artifacts_dir: Path,
+) -> None:
+    """Re-run the artifact validator in the replayed lane context and require
+    that the persisted artifact derives EXACTLY the ledgered typed event —
+    a forged artifact-plus-digest-plus-chain still cannot forge the event."""
+    raw = _load_artifact(artifacts_dir / outcome["path"])
+    review_kind = REVIEW_KIND_FOR_LANE_KIND[policy.lane_kind]
+    try:
+        derived: Event
+        if isinstance(event, AuthorResultAccepted):
+            summary = validate_author_result(
+                schemas,
+                raw,
+                identity=identity,
+                expected_revision=1,
+                expected_author_agent=policy.author_agent,
             )
+            _check_git_block(seq, outcome, summary.tree_digest)
+            derived = event_from_author_summary(summary)
+        elif isinstance(event, FoldAccepted):
+            summary = validate_fold(
+                schemas,
+                raw,
+                identity=identity,
+                outstanding_ids=snapshot.fold_outstanding_ids(),
+                expected_revision=snapshot.revision + 1,
+                prev_sha=snapshot.current_sha,
+                expected_author_agent=policy.author_agent,
+            )
+            _check_git_block(seq, outcome, summary.tree_digest)
+            derived = event_from_fold_summary(summary)
+        elif isinstance(event, ReviewAccepted):
+            summary = validate_review(
+                schemas,
+                raw,
+                identity=identity,
+                expected_lens=Lens.GATING,
+                historical=snapshot.historical_blocking_states(),
+                current_sha=snapshot.current_sha,
+                current_tree=snapshot.current_tree,
+                expected_review_kind=review_kind,
+                expected_reviewer_agent=policy.reviewer_agent,
+            )
+            derived = event_from_review_summary(summary)
+        elif isinstance(event, GuidanceAccepted):
+            summary = validate_guidance(
+                schemas,
+                raw,
+                identity=identity,
+                expected_finding_ids=snapshot.guidance_expected_ids(),
+                current_sha=snapshot.current_sha,
+                current_tree=snapshot.current_tree,
+                expected_review_kind=review_kind,
+                expected_reviewer_agent=policy.reviewer_agent,
+            )
+            derived = event_from_guidance_summary(summary)
+        elif isinstance(event, RevisionVerified):
+            gate = validate_gate_result(
+                schemas,
+                raw,
+                identity=identity,
+                current_sha=snapshot.current_sha,
+                current_tree=snapshot.current_tree,
+            )
+            # The five worktree/range facts are driver-observed evidence with
+            # no artifact source; the artifact-backed fields must match.
+            if gate.category is not event.gate_category or gate.failed_checks != event.failed_checks:
+                raise LedgerReplayError(
+                    f"seq {seq}: gate artifact does not derive the ledgered event"
+                )
+            return
+        else:
+            raise LedgerReplayError(f"seq {seq}: no re-derivation for event {event.kind}")
+    except ArtifactError as exc:
+        raise LedgerReplayError(
+            f"seq {seq}: accepted artifact fails re-validation: {exc.artifact}"
+        ) from exc
+    if _norm(event_to_dict(derived)) != _norm(event_to_dict(event)):
+        raise LedgerReplayError(f"seq {seq}: artifact does not derive the ledgered event")
 
 
-def replay(path: Path, policy: LanePolicy, artifacts_dir: Path | None = None) -> LaneSnapshot:
+def _check_git_block(seq: int, outcome: Mapping[str, Any], claimed_tree: str) -> None:
+    git = outcome.get("git")
+    if not isinstance(git, Mapping):
+        raise LedgerReplayError(f"seq {seq}: candidate git facts missing from acceptance")
+    if not (
+        git.get("exists") is True
+        and git.get("descends_from_scope_base") is True
+        and git.get("descends_from_previous_candidate") is True
+        and git.get("tree_digest") == claimed_tree
+    ):
+        raise LedgerReplayError(f"seq {seq}: candidate git facts do not support acceptance")
+
+
+def replay(
+    path: Path,
+    policy: LanePolicy,
+    identity: LaneIdentity,
+    schemas: SchemaSet,
+    *,
+    expected_package_digests: tuple[tuple[str, str], ...] | None = None,
+    expected_config_digest: str | None = None,
+    expected_work_index_digest: str | None = None,
+    artifacts_dir: Path | None = None,
+) -> LaneSnapshot:
     """Validate the chain and replay the COMPLETE recorded run.
 
-    Checks, in order: the LANE_OPENED binding (including the policy digest),
-    the effect protocol around every decision, every accepted artifact's file
-    digest, and — for every DECISION — that re-running the pure reducer over
-    the recorded event reproduces the recorded snapshot, reason, command, and
-    predicate inputs exactly. Returns the final proved snapshot.
-
-    ``artifacts_dir`` defaults to the coordinator's layout next to the ledger;
-    pass ``artifacts_dir=None`` explicitly only when files are intentionally
-    absent (not applicable to coordinator-produced runs).
+    Checks, in order: the LANE_OPENED binding against the CALLER-supplied
+    policy, identity, schema set, and (when given) package/config/work-index
+    digests — never the ledger's self-recorded provenance alone; the effect
+    protocol around every decision; every accepted artifact's file digest AND
+    its re-validation in the replayed lane context, requiring that it derives
+    exactly the ledgered typed event; and — for every DECISION — that
+    re-running the pure reducer reproduces the recorded snapshot, reason,
+    command, and predicate inputs exactly. Returns the final proved snapshot.
     """
     entries = read_entries(path)
     if not entries:
@@ -284,6 +423,30 @@ def replay(path: Path, policy: LanePolicy, artifacts_dir: Path | None = None) ->
         raise LedgerReplayError("LANE_OPENED binding is incomplete")
     if opened.payload["policy_digest"] != policy_digest(policy):
         raise LedgerReplayError("ledger was opened under a different lane policy")
+    if opened.payload["schemas_digest"] != schemas.digest:
+        raise LedgerReplayError("ledger was opened under a different schema set")
+    if (
+        opened.lane_id != identity.lane_id
+        or opened.payload["work_item"] != identity.work_item
+        or opened.payload["manifest"] != identity.manifest
+        or opened.payload["scope_base"] != identity.scope_base
+        or opened.payload["lane_kind"] != policy.lane_kind
+    ):
+        raise LedgerReplayError("ledger was opened under a different lane identity")
+    if expected_package_digests is not None and _norm(opened.payload["package_digests"]) != _norm(
+        [list(pair) for pair in expected_package_digests]
+    ):
+        raise LedgerReplayError("ledger was opened under different project packages")
+    if (
+        expected_config_digest is not None
+        and opened.payload["config_digest"] != expected_config_digest
+    ):
+        raise LedgerReplayError("ledger was opened under a different project configuration")
+    if (
+        expected_work_index_digest is not None
+        and opened.payload["work_index_digest"] != expected_work_index_digest
+    ):
+        raise LedgerReplayError("ledger was opened under a different work index")
     if artifacts_dir is None:
         artifacts_dir = path.parent / "lanes" / opened.lane_id / "artifacts"
 
@@ -315,7 +478,7 @@ def replay(path: Path, policy: LanePolicy, artifacts_dir: Path | None = None) ->
         payload = entry.payload
         if set(payload) != _DECISION_KEYS:
             raise LedgerReplayError(f"seq {entry.seq}: decision payload keys are incomplete")
-        _check_effect_gap(
+        outcome = _check_effect_gap(
             entry.seq,
             gap,
             prev_command,
@@ -325,6 +488,10 @@ def replay(path: Path, policy: LanePolicy, artifacts_dir: Path | None = None) ->
         )
         gap = []
         event = event_from_dict(payload["event"])
+        if outcome is not None:
+            _rederive_event(
+                entry.seq, event, outcome, snapshot, policy, identity, schemas, artifacts_dir
+            )
         if payload["state_before"] != snapshot.state.value:
             raise LedgerReplayError(
                 f"seq {entry.seq}: recorded state_before {payload['state_before']!r} "

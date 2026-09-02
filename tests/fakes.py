@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from orchestrator.agents import GitFacts, InvocationSpec
+from orchestrator.agents import CandidateFacts, GitFacts, InvocationSpec
 from orchestrator.model import LaneIdentity
 from orchestrator.project import ProjectConfig, load_project
 
@@ -77,8 +77,24 @@ def make_test_project(root: Path, project_id: str = "sim-project") -> ProjectCon
         + "\n",
         encoding="utf-8",
     )
-    for rel in ("agents/author.md", "skills/design.md", "policies/lanes.yaml"):
+    for rel in ("agents/author.md", "skills/design.md"):
         (project / rel).write_text("package\n", encoding="utf-8")
+    (project / "policies" / "lanes.yaml").write_text(
+        "\n".join(
+            [
+                "schema_version: 1",
+                "lanes:",
+                "  design:",
+                "    author:   { agent: claude }",
+                "    reviewer: { agent: codex }",
+                "    accepted_gate_categories: [DOCS_INCONCLUSIVE_SCOPE_PASS, PASS]",
+                "    max_rounds: 10",
+                "    max_agent_invocations: 40",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (project / "work-index.json").write_text(
         json.dumps(
             {
@@ -247,19 +263,54 @@ def make_gate_result(
     return result
 
 
+class FakeGit:
+    """A linear lane history: BASE_SHA <- sha(1) <- sha(2) <- ... <- sha(depth).
+
+    ``candidate_facts`` answers from that history: the claimed commit's tree is
+    ``tree(n)``, and descent holds only when the candidate is strictly later
+    than the previous accepted candidate — so a rollback fails.
+    """
+
+    def __init__(self, depth: int = 99) -> None:
+        self._depth = depth
+
+    def candidate_facts(
+        self, spec: InvocationSpec, commit: str, previous_candidate: str
+    ) -> CandidateFacts:
+        try:
+            n = int(commit, 16)
+        except ValueError:
+            n = -1
+        exists = 1 <= n <= self._depth
+        if previous_candidate == BASE_SHA:
+            prev_n = 0
+        else:
+            prev_n = int(previous_candidate, 16)
+        return CandidateFacts(
+            exists=exists,
+            tree_digest=tree(n) if exists else "",
+            descends_from_scope_base=exists,
+            descends_from_previous_candidate=exists and n > prev_n,
+        )
+
+
 def build_coordinator(
     tmp_path: Path,
     *,
     lane_id: str,
-    policy: Any,
     schemas: Any,
     author: Any,
     reviewer: Any,
     gate: Any,
     clock: Any,
+    git: Any = None,
     run_id: str = "RUN-001",
 ) -> Any:
-    """A coordinator wired to a minimal Control Plane project under tmp_path."""
+    """A coordinator wired to a minimal Control Plane project under tmp_path.
+
+    The lane policy is resolved from the project's registered lanes.yaml for
+    the declared work-item kind — it is not a parameter.
+    """
     from orchestrator.application import LaneCoordinator
 
     project = make_test_project(tmp_path / "control-plane")
@@ -267,11 +318,11 @@ def build_coordinator(
         project=project,
         identity=make_identity(lane_id),
         run_id=run_id,
-        policy=policy,
         schemas=schemas,
         author=author,
         reviewer=reviewer,
         gate=gate,
+        git=git if git is not None else FakeGit(),
         clock=clock,
     )
 

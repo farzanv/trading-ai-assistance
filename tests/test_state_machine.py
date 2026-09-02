@@ -222,8 +222,9 @@ def test_fixable_gate_creates_system_finding_and_requests_repair() -> None:
     record = decision.snapshot.finding("SYS-FIXABLE_LINT")
     assert record is not None and record.state is FindingState.OPEN and record.blocking
     assert record.origin is FindingOrigin.GATE
-    # Gate-origin findings are the gate's to verify, never the reviewer's.
-    assert "SYS-FIXABLE_LINT" not in decision.snapshot.historical_blocking_states()
+    # Gate-origin findings stay in the reviewer's exact set (protocol §2): the
+    # passing gate supplies closure evidence, the reviewer reconciles it.
+    assert "SYS-FIXABLE_LINT" in decision.snapshot.historical_blocking_states()
     assert "SYS-FIXABLE_LINT" in decision.snapshot.fold_outstanding_ids()
 
 

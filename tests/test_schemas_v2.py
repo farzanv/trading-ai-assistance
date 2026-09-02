@@ -136,6 +136,32 @@ def test_gate_verdict_must_be_consistent_with_the_category() -> None:
         _validator("target-gate-result.schema.json").validate(contradiction)
 
 
+def test_failed_security_check_requires_finding_id_and_note() -> None:
+    checks = {
+        name: {"result": "PASS"}
+        for name in (
+            "parameterised_sql",
+            "no_credential_logging",
+            "least_privilege_db_objects",
+            "job_robustness_contract",
+            "provider_calls_bounded_documented",
+            "dependencies_pinned_named",
+            "no_dynamic_code_execution",
+        )
+    }
+    checks["parameterised_sql"] = {"result": "FAIL", "note": "interpolated SQL"}  # no finding_id
+    review = make_review(
+        verdict="FINDINGS",
+        review_kind="code",
+        security=checks,
+        findings=[make_finding("F1", "P1")],
+    )
+    with pytest.raises(ValidationError):
+        _validator("review.schema.json").validate(review)
+    checks["parameterised_sql"]["finding_id"] = "F1"
+    _validator("review.schema.json").validate(review)
+
+
 def test_finding_routing_flags_are_required_not_defaulted() -> None:
     for field in ("requires_ruling", "earlier_phase_gap", "blocks_downstream", "unknown_contract", "section"):
         finding = make_finding("F1")

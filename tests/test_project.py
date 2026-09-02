@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.model import GateCategory
 from orchestrator.project import ProjectError, load_project, load_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,10 +87,27 @@ def _write_minimal_project(root: Path, agents_author: str) -> Path:
         + "\n",
         encoding="utf-8",
     )
-    for rel in ("agents/author.md", "skills/design.md", "policies/lanes.yaml"):
+    for rel in ("agents/author.md", "skills/design.md"):
         target = project / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("x\n", encoding="utf-8")
+    lanes = project / "policies" / "lanes.yaml"
+    lanes.parent.mkdir(parents=True, exist_ok=True)
+    lanes.write_text(
+        "\n".join(
+            [
+                "lanes:",
+                "  design:",
+                "    author:   { agent: claude }",
+                "    reviewer: { agent: codex }",
+                "    accepted_gate_categories: [DOCS_INCONCLUSIVE_SCOPE_PASS, PASS]",
+                "    max_rounds: 10",
+                "    max_agent_invocations: 40",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (project / "work-index.json").write_text(
         json.dumps({"schema_version": 1, "project_id": "p1", "work_items": []}),
         encoding="utf-8",
@@ -159,3 +177,53 @@ def test_undeclared_work_item_fails_closed(tmp_path: Path) -> None:
     config = load_project(projects, "p1")
     with pytest.raises(ProjectError, match="not declared"):
         config.work_item("ghost_item")
+
+
+def test_lane_policies_resolve_from_the_registered_project(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    config = load_project(projects, "p1")
+    policy = config.lane_policy("design")
+    assert policy.max_rounds == 10 and policy.max_agent_invocations == 40
+    assert policy.author_agent == "claude" and policy.reviewer_agent == "codex"
+    assert GateCategory.DOCS_INCONCLUSIVE_SCOPE_PASS in policy.accepted_gate_categories
+    with pytest.raises(ProjectError, match="no registered policy"):
+        config.lane_policy("implementation")
+
+
+def test_engine_project_declares_all_three_lane_policies() -> None:
+    config = load_project(PROJECTS, "trading-ai-engine")
+    kinds = {kind for kind, _ in config.lane_policies}
+    assert kinds == {"design", "implementation", "bookkeeping"}
+    design = config.lane_policy("design")
+    assert design.max_rounds == 10 and design.max_agent_invocations == 40
+    assert config.lane_policy("bookkeeping").max_rounds == 2
+    assert len(config.config_digest) == 64 and len(config.work_index_digest) == 64
+
+
+def test_lane_policy_author_equal_reviewer_fails_closed(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    lanes = projects / "p1" / "policies" / "lanes.yaml"
+    lanes.write_text(
+        lanes.read_text(encoding="utf-8").replace("agent: codex", "agent: claude"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ProjectError, match="author equals reviewer"):
+        load_project(projects, "p1")
+
+
+def test_lane_policy_unknown_gate_category_fails_closed(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    lanes = projects / "p1" / "policies" / "lanes.yaml"
+    lanes.write_text(
+        lanes.read_text(encoding="utf-8").replace("PASS]", "LOOKS_FINE]"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ProjectError, match="policy invalid"):
+        load_project(projects, "p1")
+
+
+def test_missing_lanes_block_fails_closed(tmp_path: Path) -> None:
+    projects = _write_minimal_project(tmp_path, "agents/author.md")
+    (projects / "p1" / "policies" / "lanes.yaml").write_text("x: 1\n", encoding="utf-8")
+    with pytest.raises(ProjectError, match="missing lanes block"):
+        load_project(projects, "p1")

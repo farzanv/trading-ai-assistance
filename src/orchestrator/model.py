@@ -209,12 +209,24 @@ class LaneIdentity:
 
 @dataclass(frozen=True)
 class LanePolicy:
-    """Immutable bounds and gate acceptance for one lane (architecture §4.1)."""
+    """Immutable bounds, gate acceptance, and role binding for one lane
+    (architecture §4.1). Resolved from the registered project's lane policy for
+    the declared work-item kind — never supplied free-form by a caller."""
 
     lane_kind: str
     accepted_gate_categories: frozenset[GateCategory]
     max_rounds: int = 10
     max_agent_invocations: int = 40
+    author_agent: str = "claude"
+    reviewer_agent: str = "codex"
+
+
+#: The review_kind a gating review must declare for each lane kind.
+REVIEW_KIND_FOR_LANE_KIND: Mapping[str, str] = {
+    "design": "design",
+    "implementation": "code",
+    "bookkeeping": "bookkeeping",
+}
 
 
 def policy_digest(policy: LanePolicy) -> str:
@@ -225,6 +237,8 @@ def policy_digest(policy: LanePolicy) -> str:
             "accepted_gate_categories": sorted(c.value for c in policy.accepted_gate_categories),
             "max_rounds": policy.max_rounds,
             "max_agent_invocations": policy.max_agent_invocations,
+            "author_agent": policy.author_agent,
+            "reviewer_agent": policy.reviewer_agent,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -285,16 +299,21 @@ class LaneSnapshot:
         )
 
     def historical_blocking_states(self) -> Mapping[str, FindingState]:
-        """Reviewer-origin blockers the reviewer must reconcile (exact set).
+        """EVERY historical blocker the reviewer must reconcile (exact set).
 
-        Gate-origin (SYS-*) findings are excluded: their resolution evidence is
-        the deterministic gate itself, not a reviewer assessment.
+        Gate-origin (SYS-*) findings are included (protocol §2): the passing
+        gate is their closure evidence, but the reviewer still reconciles the
+        root cause and may REOPEN a gamed or superficial repair.
         """
-        return {
-            f.finding_id: f.state
+        return {f.finding_id: f.state for f in self.findings if f.blocking}
+
+    def guidance_expected_ids(self) -> frozenset[str]:
+        """The exact finding set a guidance artifact must address."""
+        return frozenset(
+            f.finding_id
             for f in self.findings
-            if f.blocking and f.origin is FindingOrigin.REVIEWER
-        }
+            if f.blocking and f.state is FindingState.GUIDANCE_REQUIRED and not f.guidance_given
+        )
 
 
 # ---------------------------------------------------------------------------

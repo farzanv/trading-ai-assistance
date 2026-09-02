@@ -179,8 +179,11 @@
       "required": ["result"],
       "properties": {
         "result": { "type": "string", "enum": ["PASS", "FAIL", "N/A"] },
-        "note": { "type": "string" }
-      }
+        "note": { "type": "string" },
+        "finding_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "required on FAIL: the blocking finding in this review that represents this checklist defect" }
+      },
+      "if": { "properties": { "result": { "const": "FAIL" } } },
+      "then": { "required": ["finding_id", "note"] }
     },
     "tokens": {
       "type": "object",

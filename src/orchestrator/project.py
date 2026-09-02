@@ -18,6 +18,8 @@ from pathlib import Path
 
 import yaml
 
+from orchestrator.model import GateCategory, LanePolicy
+
 
 class ProjectError(Exception):
     """Registry/config/work-index loading failed. Fail closed; never guess."""
@@ -54,7 +56,19 @@ class ProjectConfig:
     gate_contract_status: str
     package_paths: tuple[tuple[str, Path], ...]  # (ref name, resolved path)
     package_digests: tuple[tuple[str, str], ...]  # (ref name, sha256)
+    lane_policies: tuple[tuple[str, LanePolicy], ...]  # (lane kind, policy)
+    config_digest: str  # sha256 of project.yaml
+    work_index_digest: str  # sha256 of work-index.json
     work_items: tuple[WorkItem, ...]
+
+    def lane_policy(self, lane_kind: str) -> LanePolicy:
+        """The registered policy for a lane kind — the only policy source."""
+        for kind, policy in self.lane_policies:
+            if kind == lane_kind:
+                return policy
+        raise ProjectError(
+            f"lane kind {lane_kind!r} has no registered policy in {self.project_id}"
+        )
 
     def state_root(self) -> Path:
         return self.root / "state"
@@ -161,6 +175,9 @@ def load_project(projects_root: Path, project_id: str) -> ProjectConfig:
                 raise ProjectError(f"{config_path}: {section}.{name} does not exist: {rel}")
             package_paths.append((f"{section}.{name}", path))
 
+    lanes_path = dict(package_paths).get("policies.lanes")
+    if lanes_path is None:
+        raise ProjectError(f"{config_path}: policies.lanes is required")
     work_items = _load_work_index(project_dir, project_id)
     return ProjectConfig(
         project_id=project_id,
@@ -173,8 +190,53 @@ def load_project(projects_root: Path, project_id: str) -> ProjectConfig:
         gate_contract_status=str(gate.get("contract_status", "")),
         package_paths=tuple(package_paths),
         package_digests=tuple((name, _sha256_file(path)) for name, path in package_paths),
+        lane_policies=_load_lane_policies(lanes_path),
+        config_digest=_sha256_file(config_path),
+        work_index_digest=_sha256_file(project_dir / "work-index.json"),
         work_items=work_items,
     )
+
+
+def _load_lane_policies(lanes_path: Path) -> tuple[tuple[str, LanePolicy], ...]:
+    """Parse the project's lane policy file into typed, validated policies."""
+    data = _load_yaml(lanes_path)
+    lanes = data.get("lanes")
+    if not isinstance(lanes, dict) or not lanes:
+        raise ProjectError(f"{lanes_path}: missing lanes block")
+    policies: list[tuple[str, LanePolicy]] = []
+    for kind, cfg in sorted(lanes.items()):
+        if not isinstance(cfg, dict):
+            raise ProjectError(f"{lanes_path}: lane {kind!r} is not a mapping")
+        try:
+            accepted = frozenset(
+                GateCategory(name) for name in cfg["accepted_gate_categories"]
+            )
+            max_rounds = int(cfg["max_rounds"])
+            max_invocations = int(cfg["max_agent_invocations"])
+            author_agent = str(cfg["author"]["agent"])
+            reviewer_agent = str(cfg["reviewer"]["agent"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(f"{lanes_path}: lane {kind!r} policy invalid: {exc}") from None
+        if max_rounds < 1 or max_invocations < 1:
+            raise ProjectError(f"{lanes_path}: lane {kind!r} bounds must be positive")
+        if author_agent == reviewer_agent:
+            # Non-authoring review is structural: the same agent can never
+            # hold both roles in one lane kind.
+            raise ProjectError(f"{lanes_path}: lane {kind!r} author equals reviewer")
+        policies.append(
+            (
+                kind,
+                LanePolicy(
+                    lane_kind=kind,
+                    accepted_gate_categories=accepted,
+                    max_rounds=max_rounds,
+                    max_agent_invocations=max_invocations,
+                    author_agent=author_agent,
+                    reviewer_agent=reviewer_agent,
+                ),
+            )
+        )
+    return tuple(policies)
 
 
 def _load_work_index(project_dir: Path, project_id: str) -> tuple[WorkItem, ...]:
